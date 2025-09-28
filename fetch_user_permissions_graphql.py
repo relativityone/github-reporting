@@ -377,11 +377,32 @@ class GitHubGraphQLPermissionsFetcher:
         """
         try:
             # Check if GitHub CLI is available
-            subprocess.run(['gh', '--version'], capture_output=True, check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            print(f"    ⚠️  GitHub CLI (gh) not found or not authenticated")
+            version_result = subprocess.run(['gh', '--version'], capture_output=True, text=True, check=True)
+            print(f"    🔧 GitHub CLI version: {version_result.stdout.strip().split()[2] if len(version_result.stdout.strip().split()) > 2 else 'unknown'}")
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"    ⚠️  GitHub CLI (gh) not found or not authenticated: {e}")
             print(f"    💡 Install with: brew install gh && gh auth login")
             return []
+        
+        # Check GitHub CLI authentication status
+        try:
+            auth_result = subprocess.run(['gh', 'auth', 'status'], capture_output=True, text=True, timeout=10)
+            if auth_result.returncode != 0:
+                print(f"    🔐 GitHub CLI auth status: {auth_result.stderr.strip()}")
+            else:
+                print(f"    ✅ GitHub CLI authenticated")
+            
+            # Test if GitHub CLI can access organization teams
+            test_result = subprocess.run(['gh', 'api', f'/orgs/{self.organization}/teams', '--jq', 'length'], capture_output=True, text=True, timeout=10)
+            if test_result.returncode == 0:
+                team_count = test_result.stdout.strip()
+                print(f"    ✅ GitHub CLI can access organization teams (found {team_count} teams)")
+            else:
+                print(f"    ❌ GitHub CLI cannot access organization teams: {test_result.stderr.strip()}")
+                print(f"    💡 This may indicate insufficient token permissions for team access")
+                
+        except Exception as e:
+            print(f"    ⚠️  Could not check auth status: {e}")
         
         print(f"    🔍 Querying teams via GitHub CLI for {repo_name}...")
         all_teams = []
@@ -419,6 +440,10 @@ class GitHubGraphQLPermissionsFetcher:
                 
                 teams_result = subprocess.run(cmd_teams, capture_output=True, text=True, timeout=60)
                 
+                print(f"    🔧 Org teams - Return code: {teams_result.returncode}")
+                if teams_result.stderr:
+                    print(f"    🔧 Org teams - STDERR: {teams_result.stderr.strip()}")
+                
                 if teams_result.returncode == 0 and teams_result.stdout.strip():
                     org_teams = []
                     for line in teams_result.stdout.strip().split('\n'):
@@ -431,10 +456,13 @@ class GitHubGraphQLPermissionsFetcher:
                     print(f"    � Checking {len(org_teams)} organization teams for repository access...")
                     
                     # Check each team's repositories to see if they have access to our repo
-                    for team in org_teams:
+                    for i, team in enumerate(org_teams):
                         team_slug = team.get('slug', '')
                         if not team_slug:
                             continue
+                        
+                        if i % 20 == 0:  # Progress indicator for large orgs
+                            print(f"    📊 Progress: checked {i}/{len(org_teams)} teams")
                             
                         try:
                             # Check if this team has access to the repository
@@ -482,18 +510,39 @@ class GitHubGraphQLPermissionsFetcher:
                                     
                                 except json.JSONDecodeError:
                                     continue
+                            elif check_result.returncode == 404:
+                                # Team doesn't have access - this is normal, don't log
+                                continue
+                            else:
+                                # Other error - only log if it's not a common "no access" response
+                                if "404" not in check_result.stderr:
+                                    print(f"    🔧 Team {team_slug} check failed: RC={check_result.returncode}, STDERR={check_result.stderr.strip()}")
                                     
                         except subprocess.TimeoutExpired:
                             print(f"    ⏰ Timeout checking team {team_slug}")
                             continue
-                        except Exception:
+                        except Exception as e:
+                            print(f"    ⚠️  Error checking team {team_slug}: {e}")
                             continue
+                else:
+                    print(f"    ❌ Failed to get organization teams: RC={teams_result.returncode}")
+                    if teams_result.stderr:
+                        print(f"    ❌ Error: {teams_result.stderr.strip()}")
                             
             except Exception as e:
                 print(f"    ⚠️  Organization teams approach failed: {e}")
         
         if not all_teams:
-            print(f"    📝 No team permissions found for {repo_name}")
+            print(f"    📝 No team permissions found for {repo_name} after trying both strategies")
+            # Try one more debug approach - check if we can access the repo at all
+            try:
+                repo_check = subprocess.run(['gh', 'api', f'/repos/{repo_full_name}'], capture_output=True, text=True, timeout=10)
+                if repo_check.returncode == 0:
+                    print(f"    ✅ Repository {repo_name} is accessible via GitHub CLI")
+                else:
+                    print(f"    ❌ Repository {repo_name} not accessible: {repo_check.stderr.strip()}")
+            except Exception as e:
+                print(f"    ⚠️  Could not check repository access: {e}")
         else:
             print(f"    ✅ Found {len(all_teams)} team(s) with access to {repo_name}")
             
@@ -1083,19 +1132,26 @@ def main():
     summary_output = f"{organization}_direct_summary_graphql.csv"
     repo_summary_output = f"{organization}_repository_summary_graphql.csv"
     
-    # Check for GitHub token (prefer PAT over default GITHUB_TOKEN)
-    github_token = os.getenv('GITHUB_PAT') or os.getenv('GITHUB_TOKEN')
+    # Check for GitHub token (prefer REL_TOKEN > GITHUB_PAT > GITHUB_TOKEN)
+    github_token = os.getenv('REL_TOKEN') or os.getenv('GITHUB_PAT') or os.getenv('GITHUB_TOKEN')
     if not github_token:
         print("❌ Error: GitHub token is required.")
         print("💡 For organization access, please set a Personal Access Token:")
+        print("   export REL_TOKEN='your_personal_access_token'  # (preferred)")
         print("   export GITHUB_PAT='your_personal_access_token'")
         print("💡 Alternatively, use the default token: export GITHUB_TOKEN=$(gh auth token)")
         print("")
         print("🔐 Required PAT scopes: 'repo', 'read:org', 'read:user'")
         sys.exit(1)
     else:
-        token_type = "PAT" if os.getenv('GITHUB_PAT') else "default token"
-        print(f"✅ GitHub {token_type} found and loaded")
+        if os.getenv('REL_TOKEN'):
+            token_type = "REL_TOKEN"
+        elif os.getenv('GITHUB_PAT'):
+            token_type = "GITHUB_PAT"
+        else:
+            token_type = "GITHUB_TOKEN"
+        print(f"✅ GitHub token found and loaded: {token_type}")
+        print(f"🔐 Token length: {len(github_token)} characters")
     
     # Check for GitHub CLI (for enhanced team detection)
     try:

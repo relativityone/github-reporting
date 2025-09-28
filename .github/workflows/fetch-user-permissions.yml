@@ -49,9 +49,22 @@ jobs:
     - name: Set up GitHub CLI
       run: |
         # GitHub CLI is pre-installed on GitHub Actions runners
-        # Authenticate using the same token as the workflow
-        echo "${{ secrets.REL_TOKEN || secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+        # Authenticate using REL_TOKEN for enhanced permissions
+        if [ -n "${{ secrets.REL_TOKEN }}" ]; then
+          echo "🔐 Using REL_TOKEN for GitHub CLI authentication"
+          echo "${{ secrets.REL_TOKEN }}" | gh auth login --with-token
+        else
+          echo "🔐 Using GITHUB_TOKEN for GitHub CLI authentication"
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+        fi
+        echo "🔐 GitHub CLI Authentication Status:"
         gh auth status
+        echo "🔍 Testing API access:"
+        gh api /user
+        echo "🏢 Testing organization access:"
+        gh api /orgs/relativityone
+        echo "👥 Testing teams access:"
+        gh api /orgs/relativityone/teams --jq 'length' || echo "❌ Teams access failed"
         
     - name: Install dependencies
       run: |
@@ -85,14 +98,28 @@ jobs:
     
     - name: Run user permissions fetcher
       env:
-        GITHUB_PAT: ${{ secrets.REL_TOKEN }}
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Set REL_TOKEN as primary token for both GitHub CLI and Python script
+        REL_TOKEN: ${{ secrets.REL_TOKEN }}
+        GITHUB_PAT: ${{ secrets.REL_TOKEN }}  # For Python script compatibility
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Final fallback
       run: |
         echo "🚀 Starting GitHub user permissions fetch"
         echo "🏢 Organization: $ORGANIZATION"
         echo "📦 Include archived: $INCLUDE_ARCHIVED"
         
+        # Debug token information (without exposing the actual token)
+        if [ -n "$REL_TOKEN" ]; then
+          echo "✅ REL_TOKEN available (${#REL_TOKEN} chars)"
+        else
+          echo "❌ REL_TOKEN not available"
+        fi
+        
         if [ -n "$GITHUB_PAT" ]; then
+          echo "✅ GITHUB_PAT available (${#GITHUB_PAT} chars)"
+        else
+          echo "❌ GITHUB_PAT not available"
+        
+        if [ -n "$REL_TOKEN" ]; then
           echo "🔐 Using Personal Access Token (REL_TOKEN) for enhanced permissions"
         else
           echo "⚠️  Using default GITHUB_TOKEN (limited permissions)"
