@@ -250,6 +250,125 @@ class GitHubGraphQLPermissionsFetcher:
             # Re-check rate limit after waiting
             self.check_rate_limit()
     
+    def fetch_all_collaborators_for_repo(self, repo_name: str, repo_full_name: str) -> List[Dict[str, Any]]:
+        """Fetch all collaborators for a specific repository with pagination."""
+        all_collaborators = []
+        has_next_page = True
+        after_cursor = None
+        page_num = 1
+        
+        while has_next_page:
+            query = """
+            query($repo_owner: String!, $repo_name: String!, $first: Int!, $after: String) {
+                repository(owner: $repo_owner, name: $repo_name) {
+                    collaborators(first: $first, after: $after, affiliation: ALL) {
+                        totalCount
+                        pageInfo {
+                            hasNextPage
+                            endCursor
+                        }
+                        nodes {
+                            login
+                            name
+                            avatarUrl
+                            url
+                            __typename
+                            ... on User {
+                                id
+                                company
+                                location
+                            }
+                        }
+                        edges {
+                            permission
+                            node {
+                                login
+                                __typename
+                            }
+                        }
+                    }
+                }
+            }
+            """
+            
+            # Split the repo full name into owner and name
+            repo_owner = repo_full_name.split('/')[0] if '/' in repo_full_name else self.organization
+            
+            variables = {
+                "repo_owner": repo_owner,
+                "repo_name": repo_name,
+                "first": 100,
+                "after": after_cursor
+            }
+            
+            if page_num > 1:
+                print(f"    📄 Fetching collaborators page {page_num} for {repo_name}...")
+            
+            data = self.execute_graphql_query(query, variables)
+            
+            if not data or 'repository' not in data or not data['repository']:
+                print(f"    ⚠️  Failed to fetch collaborators for {repo_name}")
+                break
+                
+            collaborators_data = data['repository'].get('collaborators', {})
+            if not collaborators_data:
+                break
+                
+            # Map collaborator nodes to edges (which contain permissions)
+            collaborator_map = {}
+            edges = collaborators_data.get('edges', [])
+            for edge in edges:
+                if edge and edge.get('node') and edge['node'].get('login'):
+                    login = edge['node']['login']
+                    permission = edge.get('permission', 'unknown')
+                    collaborator_map[login] = permission
+
+            # Process collaborator details
+            nodes = collaborators_data.get('nodes', [])
+            for collaborator in nodes:
+                if not collaborator:
+                    continue
+                    
+                login = collaborator.get('login')
+                if not login:
+                    continue
+                    
+                permission = collaborator_map.get(login, 'unknown')
+                
+                collaborator_data = {
+                    'login': login,
+                    'name': collaborator.get('name', ''),
+                    'email': '',  # Email not accessible with current token scopes
+                    'avatar_url': collaborator.get('avatarUrl', ''),
+                    'url': collaborator.get('url', ''),
+                    'permission': permission,
+                    'type': collaborator.get('__typename', 'User'),
+                    'id': collaborator.get('id', ''),
+                    'company': collaborator.get('company', ''),
+                    'location': collaborator.get('location', '')
+                }
+                all_collaborators.append(collaborator_data)
+            
+            # Check pagination
+            page_info = collaborators_data.get('pageInfo', {})
+            has_next_page = page_info.get('hasNextPage', False)
+            after_cursor = page_info.get('endCursor')
+            page_num += 1
+            
+            # Add small delay between pages
+            if has_next_page:
+                time.sleep(0.5)
+        
+        total_found = len(all_collaborators)
+        expected_total = collaborators_data.get('totalCount', total_found) if 'collaborators_data' in locals() else total_found
+        
+        if total_found != expected_total:
+            print(f"    ⚠️  {repo_name}: Retrieved {total_found}/{expected_total} collaborators")
+        elif page_num > 2:  # More than 1 page
+            print(f"    ✅ {repo_name}: Retrieved all {total_found} collaborators ({page_num-1} pages)")
+            
+        return all_collaborators
+
     def fetch_repositories_with_collaborators(self, include_archived: bool = False) -> List[Dict[str, Any]]:
         """
         Fetch all repositories with their collaborators using GraphQL.
@@ -269,7 +388,7 @@ class GitHubGraphQLPermissionsFetcher:
         while has_next_page:
             print(f"\n📄 Fetching page {page_num} of repositories...")
             
-            # GraphQL query to get repositories with collaborators
+            # Simplified GraphQL query to get repositories without collaborators first
             query = """
             query($org: String!, $first: Int!, $after: String) {
                 organization(login: $org) {
@@ -288,32 +407,6 @@ class GitHubGraphQLPermissionsFetcher:
                             isDisabled
                             updatedAt
                             createdAt
-                            collaborators(first: 100, affiliation: ALL) {
-                                totalCount
-                                pageInfo {
-                                    hasNextPage
-                                    endCursor
-                                }
-                                nodes {
-                                    login
-                                    name
-                                    avatarUrl
-                                    url
-                                    __typename
-                                    ... on User {
-                                        id
-                                        company
-                                        location
-                                    }
-                                }
-                                edges {
-                                    permission
-                                    node {
-                                        login
-                                        __typename
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -384,51 +477,20 @@ class GitHubGraphQLPermissionsFetcher:
                     'collaborators': []
                 }
                 
-                # Process collaborators (handle cases where data might be missing due to permissions)
-                collaborators_data = repo.get('collaborators', {})
-                if not collaborators_data:
-                    print(f"⚠️  No collaborator data for {repo['name']} (likely access denied)")
-                    # Create repo entry with empty collaborators list
+                # Fetch all collaborators for this repository with proper pagination
+                print(f"  🔍 Fetching collaborators for {repo['name']}...")
+                try:
+                    collaborators = self.fetch_all_collaborators_for_repo(repo['name'], repo['nameWithOwner'])
+                    repo_data['collaborators'] = collaborators
+                    
+                    if collaborators:
+                        print(f"    ✅ Found {len(collaborators)} collaborators")
+                    else:
+                        print(f"    ⚠️  No collaborators found (may be access restricted)")
+                        
+                except Exception as e:
+                    print(f"    ❌ Failed to fetch collaborators: {e}")
                     repo_data['collaborators'] = []
-                    all_repos_data.append(repo_data)
-                    processed_repos += 1
-                    continue
-                    
-                total_collaborators = collaborators_data.get('totalCount', 0)
-                
-                # Handle case where there are more than 100 collaborators
-                if collaborators_data['pageInfo']['hasNextPage']:
-                    print(f"⚠️  Repository {repo['name']} has {total_collaborators} collaborators (>100)")
-                    print("   Note: Only first 100 collaborators fetched per repository (GitHub API limit)")
-                
-                # Map collaborator nodes to edges (which contain permissions)
-                collaborator_map = {}
-                edges = collaborators_data.get('edges', [])
-                for edge in edges:
-                    if edge and edge.get('node') and edge['node'].get('login'):
-                        login = edge['node']['login']
-                        permission = edge.get('permission', 'unknown')
-                        collaborator_map[login] = permission
-
-                # Process collaborator details
-                nodes = collaborators_data.get('nodes', [])
-                for collaborator in nodes:
-                    login = collaborator['login']
-                    permission = collaborator_map.get(login, 'unknown')
-                    
-                    collaborator_data = {
-                        'login': login,
-                        'name': collaborator.get('name', ''),
-                        'email': '',  # Email not accessible with current token scopes
-                        'avatar_url': collaborator.get('avatarUrl', ''),
-                        'url': collaborator.get('url', ''),
-                        'permission': permission,
-                        'type': collaborator.get('__typename', 'User'),
-                        'id': collaborator.get('id', ''),
-                        'company': collaborator.get('company', ''),
-                        'location': collaborator.get('location', '')
-                    }
-                    repo_data['collaborators'].append(collaborator_data)
                 
                 all_repos_data.append(repo_data)
                 processed_repos += 1
@@ -461,10 +523,27 @@ class GitHubGraphQLPermissionsFetcher:
         elapsed_time = datetime.now() - self.start_time
         print(f"\n🎉 REPOSITORY FETCH COMPLETE!")
         print(f"⏱️  Total fetch time: {elapsed_time}")
+        
+        # Calculate comprehensive statistics
+        total_collaborators = sum(len(repo['collaborators']) for repo in all_repos_data)
+        repos_with_collabs = sum(1 for repo in all_repos_data if repo['collaborators'])
+        repos_without_collabs = len(all_repos_data) - repos_with_collabs
+        
         print(f"📊 Final statistics:")
         print(f"   • Repositories processed: {len(all_repos_data):,}")
+        print(f"   • Repositories with collaborators: {repos_with_collabs:,}")
+        print(f"   • Repositories without collaborators: {repos_without_collabs:,}")
+        print(f"   • Total collaborator records: {total_collaborators:,}")
         print(f"   • Total GraphQL queries: {self.total_queries:,}")
-        print(f"   • Average time per query: {elapsed_time.total_seconds()/max(self.total_queries,1):.2f}s")
+        print(f"   • Average collaborators per repo: {total_collaborators/max(len(all_repos_data),1):.1f}")
+        print(f"   • Average processing time per repo: {elapsed_time.total_seconds()/max(len(all_repos_data),1):.2f}s")
+        
+        if repos_without_collabs > 0:
+            print(f"\n⚠️  {repos_without_collabs} repositories have no collaborator data")
+            print("   This may be due to:")
+            print("   • Private repositories you cannot access")
+            print("   • Repositories with no explicit collaborators (owner-only)")
+            print("   • API permission restrictions")
         
         return all_repos_data
     
@@ -748,6 +827,42 @@ class GitHubGraphQLPermissionsFetcher:
         print(f"   • Active: {repo_characteristics['active']:,} | Archived: {repo_characteristics['archived']:,}")
         print(f"   • Original: {repo_characteristics['original']:,} | Forks: {repo_characteristics['fork']:,}")
         print(f"   • Enabled: {repo_characteristics['enabled']:,} | Disabled: {repo_characteristics['disabled']:,}")
+        
+        # Add data completeness assessment
+        repos_with_data = sum(1 for repo in repos_data if repo['collaborators'])
+        repos_without_data = len(repos_data) - repos_with_data
+        completeness_percentage = (repos_with_data / max(len(repos_data), 1)) * 100
+        
+        print(f"\n📈 Data Completeness Assessment:")
+        print(f"   • Repositories with collaborator data: {repos_with_data:,} ({completeness_percentage:.1f}%)")
+        print(f"   • Repositories without collaborator data: {repos_without_data:,} ({100-completeness_percentage:.1f}%)")
+        
+        if completeness_percentage < 90:
+            print(f"\n⚠️  Data completeness is {completeness_percentage:.1f}% - some repositories may be inaccessible")
+            print("💡 To improve completeness:")
+            print("   • Ensure your token has 'repo' scope for private repositories")
+            print("   • Check if you're a member of the organization")
+            print("   • Some repositories may genuinely have no collaborators")
+        else:
+            print(f"\n✅ Good data completeness: {completeness_percentage:.1f}%")
+        
+        # Add data completeness assessment
+        repos_with_data = sum(1 for repo in repos_data if repo['collaborators'])
+        repos_without_data = len(repos_data) - repos_with_data
+        completeness_percentage = (repos_with_data / max(len(repos_data), 1)) * 100
+        
+        print(f"\n📈 Data Completeness Assessment:")
+        print(f"   • Repositories with collaborator data: {repos_with_data:,} ({completeness_percentage:.1f}%)")
+        print(f"   • Repositories without collaborator data: {repos_without_data:,} ({100-completeness_percentage:.1f}%)")
+        
+        if completeness_percentage < 90:
+            print(f"\n⚠️  Data completeness is {completeness_percentage:.1f}% - some repositories may be inaccessible")
+            print("💡 To improve completeness:")
+            print("   • Ensure your token has 'repo' scope for private repositories")
+            print("   • Check if you're a member of the organization")
+            print("   • Some repositories may genuinely have no collaborators")
+        else:
+            print(f"\n✅ Good data completeness: {completeness_percentage:.1f}%")
 
 
 def main():
