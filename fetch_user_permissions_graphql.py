@@ -412,7 +412,7 @@ class GitHubGraphQLPermissionsFetcher:
         except Exception as e:
             print(f"    ⚠️  Could not check auth status: {e}")
         
-        print(f"    🔍 Querying teams via GitHub CLI for {repo_name}...")
+        print(f"    🔍 Querying teams via GitHub CLI for {repo_full_name}...")
         all_teams = []
         
         # Strategy 1: Try the direct repo teams endpoint
