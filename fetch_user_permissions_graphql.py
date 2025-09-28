@@ -373,8 +373,7 @@ class GitHubGraphQLPermissionsFetcher:
     def fetch_teams_for_repo(self, repo_name: str, repo_full_name: str) -> List[Dict[str, Any]]:
         """Fetch teams with access to a specific repository using GitHub CLI.
         
-        This approach uses 'gh api' to get more accurate team permission data
-        that's not easily available through GraphQL queries.
+        This approach uses multiple GitHub CLI strategies to get comprehensive team permission data.
         """
         try:
             # Check if GitHub CLI is available
@@ -384,9 +383,11 @@ class GitHubGraphQLPermissionsFetcher:
             print(f"    💡 Install with: brew install gh && gh auth login")
             return []
         
+        print(f"    🔍 Querying teams via GitHub CLI for {repo_name}...")
+        all_teams = []
+        
+        # Strategy 1: Try the direct repo teams endpoint
         try:
-            # Use GitHub CLI to get team permissions for the repository
-            # This uses the REST API endpoint through gh cli
             cmd = [
                 'gh', 'api',
                 f'/repos/{repo_full_name}/teams',
@@ -394,58 +395,142 @@ class GitHubGraphQLPermissionsFetcher:
                 '--jq', '.[] | {id: .id, name: .name, slug: .slug, description: .description, privacy: .privacy, permission: .permission, url: .html_url}'
             ]
             
-            print(f"    🔍 Querying teams via GitHub CLI for {repo_name}...")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
-            if result.returncode != 0:
-                if "404" in result.stderr:
-                    print(f"    📝 No team permissions found for {repo_name} (may be expected)")
-                elif "403" in result.stderr:
-                    print(f"    🔒 Access denied for team data on {repo_name} (insufficient permissions)")
-                else:
-                    print(f"    ⚠️  GitHub CLI error for {repo_name}: {result.stderr.strip()}")
-                return []
-            
-            # Parse the JSON output from gh cli
-            all_teams = []
-            output_lines = result.stdout.strip().split('\n')
-            
-            for line in output_lines:
-                if not line.strip():
-                    continue
-                    
-                try:
-                    team_info = json.loads(line)
-                    
-                    team_data = {
-                        'login': f"@{self.organization}/{team_info.get('slug', 'unknown')}",
-                        'name': team_info.get('name', ''),
-                        'email': '',
-                        'avatar_url': '',
-                        'url': team_info.get('url', ''),
-                        'permission': team_info.get('permission', 'unknown').lower(),
-                        'type': 'Team',
-                        'id': str(team_info.get('id', '')),
-                        'company': '',
-                        'location': '',
-                        'team_slug': team_info.get('slug', ''),
-                        'team_description': team_info.get('description', ''),
-                        'team_privacy': team_info.get('privacy', '')
-                    }
-                    all_teams.append(team_data)
-                    
-                except json.JSONDecodeError as e:
-                    print(f"    ⚠️  Failed to parse team data: {e}")
-                    continue
-            
-            return all_teams
-            
-        except subprocess.TimeoutExpired:
-            print(f"    ⏰ Timeout querying teams for {repo_name}")
-            return []
+            if result.returncode == 0 and result.stdout.strip():
+                print(f"    ✅ Found teams via direct endpoint")
+                all_teams.extend(self._parse_team_output(result.stdout))
+            else:
+                print(f"    � Direct endpoint returned no teams, trying organization approach...")
+                
         except Exception as e:
-            print(f"    ❌ Error fetching teams for {repo_name}: {e}")
-            return []
+            print(f"    ⚠️  Direct endpoint failed: {e}")
+        
+        # Strategy 2: Get all org teams and check which have access to this repo
+        if not all_teams:
+            try:
+                # First, get all organization teams
+                cmd_teams = [
+                    'gh', 'api',
+                    f'/orgs/{self.organization}/teams',
+                    '--paginate',
+                    '--jq', '.[] | {id: .id, name: .name, slug: .slug, description: .description, privacy: .privacy, url: .html_url}'
+                ]
+                
+                teams_result = subprocess.run(cmd_teams, capture_output=True, text=True, timeout=60)
+                
+                if teams_result.returncode == 0 and teams_result.stdout.strip():
+                    org_teams = []
+                    for line in teams_result.stdout.strip().split('\n'):
+                        if line.strip():
+                            try:
+                                org_teams.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue
+                    
+                    print(f"    � Checking {len(org_teams)} organization teams for repository access...")
+                    
+                    # Check each team's repositories to see if they have access to our repo
+                    for team in org_teams:
+                        team_slug = team.get('slug', '')
+                        if not team_slug:
+                            continue
+                            
+                        try:
+                            # Check if this team has access to the repository
+                            cmd_check = [
+                                'gh', 'api',
+                                f'/orgs/{self.organization}/teams/{team_slug}/repos/{repo_full_name}',
+                                '--jq', '.permissions // empty'
+                            ]
+                            
+                            check_result = subprocess.run(cmd_check, capture_output=True, text=True, timeout=10)
+                            
+                            if check_result.returncode == 0 and check_result.stdout.strip():
+                                # Team has access to this repository
+                                try:
+                                    permissions = json.loads(check_result.stdout.strip())
+                                    
+                                    # Determine the permission level
+                                    permission_level = 'read'  # default
+                                    if permissions.get('admin'):
+                                        permission_level = 'admin'
+                                    elif permissions.get('maintain'):
+                                        permission_level = 'maintain'
+                                    elif permissions.get('push'):
+                                        permission_level = 'write'
+                                    elif permissions.get('triage'):
+                                        permission_level = 'triage'
+                                    
+                                    team_data = {
+                                        'login': f"@{self.organization}/{team_slug}",
+                                        'name': team.get('name', ''),
+                                        'email': '',
+                                        'avatar_url': '',
+                                        'url': team.get('url', ''),
+                                        'permission': permission_level,
+                                        'type': 'Team',
+                                        'id': str(team.get('id', '')),
+                                        'company': '',
+                                        'location': '',
+                                        'team_slug': team_slug,
+                                        'team_description': team.get('description', ''),
+                                        'team_privacy': team.get('privacy', '')
+                                    }
+                                    all_teams.append(team_data)
+                                    print(f"    ✅ Found team: {team_slug} ({permission_level})")
+                                    
+                                except json.JSONDecodeError:
+                                    continue
+                                    
+                        except subprocess.TimeoutExpired:
+                            print(f"    ⏰ Timeout checking team {team_slug}")
+                            continue
+                        except Exception:
+                            continue
+                            
+            except Exception as e:
+                print(f"    ⚠️  Organization teams approach failed: {e}")
+        
+        if not all_teams:
+            print(f"    📝 No team permissions found for {repo_name}")
+        else:
+            print(f"    ✅ Found {len(all_teams)} team(s) with access to {repo_name}")
+            
+        return all_teams
+    
+    def _parse_team_output(self, output: str) -> List[Dict[str, Any]]:
+        """Parse team output from GitHub CLI."""
+        teams = []
+        for line in output.strip().split('\n'):
+            if not line.strip():
+                continue
+                
+            try:
+                team_info = json.loads(line)
+                
+                team_data = {
+                    'login': f"@{self.organization}/{team_info.get('slug', 'unknown')}",
+                    'name': team_info.get('name', ''),
+                    'email': '',
+                    'avatar_url': '',
+                    'url': team_info.get('url', ''),
+                    'permission': team_info.get('permission', 'unknown').lower(),
+                    'type': 'Team',
+                    'id': str(team_info.get('id', '')),
+                    'company': '',
+                    'location': '',
+                    'team_slug': team_info.get('slug', ''),
+                    'team_description': team_info.get('description', ''),
+                    'team_privacy': team_info.get('privacy', '')
+                }
+                teams.append(team_data)
+                
+            except json.JSONDecodeError as e:
+                print(f"    ⚠️  Failed to parse team data: {e}")
+                continue
+                
+        return teams
 
     def fetch_repositories_with_collaborators(self, include_archived: bool = False) -> List[Dict[str, Any]]:
         """
