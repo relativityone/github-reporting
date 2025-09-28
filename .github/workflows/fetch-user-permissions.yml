@@ -1,0 +1,133 @@
+name: Fetch GitHub User Permissions
+
+on:
+  # Run on manual trigger
+  workflow_dispatch:
+    inputs:
+      organization:
+        description: 'GitHub organization name'
+        required: true
+        default: 'relativityone'
+        type: string
+      include_archived:
+        description: 'Include archived repositories'
+        required: false
+        default: false
+        type: boolean
+  
+  # Run on schedule (weekly on Mondays at 8 AM UTC)
+  schedule:
+    - cron: '0 8 * * 1'
+  
+  # Run on push to main branch (for testing)
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'fetch_user_permissions_graphql.py'
+      - '.github/workflows/fetch-user-permissions.yml'
+
+jobs:
+  fetch-permissions:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      actions: read
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        else
+          pip install requests pandas
+        fi
+        
+    - name: Verify Python environment
+      run: |
+        python --version
+        pip list
+        
+    - name: Set organization from input or default
+      run: |
+        if [ "${{ github.event.inputs.organization }}" != "" ]; then
+          echo "ORGANIZATION=${{ github.event.inputs.organization }}" >> $GITHUB_ENV
+        else
+          echo "ORGANIZATION=relativityone" >> $GITHUB_ENV
+        fi
+        
+    - name: Set include_archived from input
+      run: |
+        if [ "${{ github.event.inputs.include_archived }}" == "true" ]; then
+          echo "INCLUDE_ARCHIVED=true" >> $GITHUB_ENV
+        else
+          echo "INCLUDE_ARCHIVED=false" >> $GITHUB_ENV
+        fi
+    
+    - name: Run user permissions fetcher
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        echo "🚀 Starting GitHub user permissions fetch"
+        echo "🏢 Organization: $ORGANIZATION"
+        echo "📦 Include archived: $INCLUDE_ARCHIVED"
+        
+        # Modify the script to use environment variables if needed
+        python fetch_user_permissions_graphql.py
+    
+    - name: Check generated files
+      run: |
+        echo "📁 Files generated:"
+        ls -la *.csv || echo "No CSV files found"
+        
+        if ls *.csv 1> /dev/null 2>&1; then
+          echo "✅ CSV files created successfully"
+          for file in *.csv; do
+            echo "📊 $file: $(wc -l < "$file") lines"
+          done
+        else
+          echo "❌ No CSV files were generated"
+          exit 1
+        fi
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      if: success()
+      with:
+        name: github-permissions-report-${{ github.run_number }}
+        path: |
+          *.csv
+        retention-days: 30
+    
+    - name: Create summary
+      if: always()
+      run: |
+        echo "## GitHub Permissions Report Summary 📊" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Organization:** $ORGANIZATION" >> $GITHUB_STEP_SUMMARY
+        echo "**Include Archived:** $INCLUDE_ARCHIVED" >> $GITHUB_STEP_SUMMARY
+        echo "**Run Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if ls *.csv 1> /dev/null 2>&1; then
+          echo "### Generated Files 📁" >> $GITHUB_STEP_SUMMARY
+          for file in *.csv; do
+            lines=$(wc -l < "$file")
+            size=$(du -h "$file" | cut -f1)
+            echo "- **$file**: $((lines-1)) records ($size)" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Status:** SUCCESS - Reports generated successfully" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Status:** FAILED - No reports were generated" >> $GITHUB_STEP_SUMMARY
+        fi
