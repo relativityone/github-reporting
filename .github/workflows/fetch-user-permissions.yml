@@ -63,8 +63,6 @@ jobs:
         gh api /user --jq '.login'
         echo "🏢 Testing organization access:"
         gh api /orgs/relativityone --jq '.login'
-        echo "👥 Testing teams access:"
-        gh api /orgs/relativityone/teams --jq 'length' || echo "❌ Teams access failed"
         
     - name: Install dependencies
       run: |

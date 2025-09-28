@@ -371,9 +371,10 @@ class GitHubGraphQLPermissionsFetcher:
         return all_collaborators
 
     def fetch_teams_for_repo(self, repo_name: str, repo_full_name: str) -> List[Dict[str, Any]]:
-        """Fetch teams with access to a specific repository using GitHub CLI with REL_TOKEN.
+        """Fetch teams with access to a specific repository using only the direct repository teams endpoint.
         
-        This approach uses GitHub CLI but ensures it uses the correct PAT token.
+        This approach uses GitHub CLI to query only the /repos/{owner}/{repo}/teams endpoint,
+        avoiding organization-wide team enumeration for security and performance reasons.
         """
         # Check token availability for debugging
         token = os.getenv('REL_TOKEN') or os.getenv('GITHUB_PAT') or os.getenv('GITHUB_TOKEN')
@@ -398,15 +399,15 @@ class GitHubGraphQLPermissionsFetcher:
             else:
                 print(f"    ✅ GitHub CLI authenticated")
             
-            # Test if we can access organization teams via GitHub CLI with REL_TOKEN
-            test_result = subprocess.run(['gh', 'api', f'/orgs/{self.organization}/teams', '--jq', 'length'], 
+            # Test basic API access via GitHub CLI
+            test_result = subprocess.run(['gh', 'api', '/user', '--jq', '.login'], 
                                        capture_output=True, text=True, timeout=10)
             if test_result.returncode == 0:
-                team_count = test_result.stdout.strip()
-                print(f"    ✅ GitHub CLI can access organization teams (found {team_count} teams)")
+                username = test_result.stdout.strip()
+                print(f"    ✅ GitHub CLI authenticated as user: {username}")
             else:
-                print(f"    ❌ GitHub CLI cannot access organization teams: {test_result.stderr.strip()}")
-                print(f"    💡 This may indicate insufficient REL_TOKEN permissions for team access")
+                print(f"    ❌ GitHub CLI authentication test failed: {test_result.stderr.strip()}")
+                print(f"    💡 This may indicate insufficient token permissions")
                 
         except Exception as e:
             print(f"    ⚠️  Could not check auth status: {e}")
@@ -435,125 +436,14 @@ class GitHubGraphQLPermissionsFetcher:
                 print(f"    ✅ Found teams via direct endpoint")
                 all_teams.extend(self._parse_team_output(result.stdout))
             else:
-                print(f"    📝 Direct endpoint returned no teams, trying organization approach...")
+                print(f"    📝 Direct endpoint returned no teams")
                 
         except Exception as e:
             print(f"    ⚠️  Direct endpoint failed: {e}")
         
-        # Strategy 2: Get all org teams and check which have access to this repo
         if not all_teams:
-            try:
-                # First, get all organization teams
-                cmd_teams = [
-                    'gh', 'api',
-                    f'/orgs/{self.organization}/teams',
-                    '--paginate',
-                    '--jq', '.[] | {id: .id, name: .name, slug: .slug, description: .description, privacy: .privacy, url: .html_url}'
-                ]
-                
-                print(f"    🔧 Getting organization teams via GitHub CLI...")
-                teams_result = subprocess.run(cmd_teams, capture_output=True, text=True, timeout=60)
-                
-                print(f"    🔧 Org teams - Return code: {teams_result.returncode}")
-                if teams_result.stderr:
-                    print(f"    🔧 Org teams - STDERR: {teams_result.stderr.strip()}")
-                
-                if teams_result.returncode == 0 and teams_result.stdout.strip():
-                    org_teams = []
-                    for line in teams_result.stdout.strip().split('\n'):
-                        if line.strip():
-                            try:
-                                org_teams.append(json.loads(line))
-                            except json.JSONDecodeError:
-                                continue
-                    
-                    print(f"    🔍 Checking {len(org_teams)} organization teams for repository access...")
-                    
-                    # Check each team's repositories to see if they have access to our repo
-                    for i, team in enumerate(org_teams):
-                        team_slug = team.get('slug', '')
-                        if not team_slug:
-                            continue
-                        
-                        if i % 20 == 0 and i > 0:  # Progress indicator
-                            print(f"    📊 Progress: checked {i}/{len(org_teams)} teams, found {len(all_teams)} with access")
-                            
-                        try:
-                            # Check if this team has access to the repository
-                            cmd_check = [
-                                'gh', 'api',
-                                f'/orgs/{self.organization}/teams/{team_slug}/repos/{repo_full_name}',
-                                '--jq', '.permissions // empty'
-                            ]
-                            
-                            check_result = subprocess.run(cmd_check, capture_output=True, text=True, timeout=10)
-                            
-                            if check_result.returncode == 0 and check_result.stdout.strip():
-                                # Team has access to this repository
-                                try:
-                                    permissions = json.loads(check_result.stdout.strip())
-                                    
-                                    # Determine the permission level
-                                    permission_level = 'read'  # default
-                                    if permissions.get('admin'):
-                                        permission_level = 'admin'
-                                    elif permissions.get('maintain'):
-                                        permission_level = 'maintain'
-                                    elif permissions.get('push'):
-                                        permission_level = 'write'
-                                    elif permissions.get('triage'):
-                                        permission_level = 'triage'
-                                    
-                                    team_data = {
-                                        'login': f"@{self.organization}/{team_slug}",
-                                        'name': team.get('name', ''),
-                                        'email': '',
-                                        'avatar_url': '',
-                                        'url': team.get('url', ''),
-                                        'permission': permission_level,
-                                        'type': 'Team',
-                                        'id': str(team.get('id', '')),
-                                        'company': '',
-                                        'location': '',
-                                        'team_slug': team_slug,
-                                        'team_description': team.get('description', ''),
-                                        'team_privacy': team.get('privacy', '')
-                                    }
-                                    all_teams.append(team_data)
-                                    print(f"    ✅ Found team: {team_slug} ({permission_level})")
-                                    
-                                except json.JSONDecodeError:
-                                    continue
-                            elif check_result.returncode == 404:
-                                # Team doesn't have access - this is normal, don't log
-                                continue
-                            elif check_result.returncode == 403:
-                                # Access forbidden - might indicate token permission issues
-                                if i < 5:  # Only log first few to avoid spam
-                                    print(f"    🔒 Team permission check forbidden (403) for {team_slug}")
-                                    print(f"    💡 REL_TOKEN may lack sufficient permissions")
-                                continue
-                            else:
-                                # Other error
-                                if "404" not in check_result.stderr:
-                                    print(f"    🔧 Team {team_slug} check failed: RC={check_result.returncode}")
-                                    
-                        except subprocess.TimeoutExpired:
-                            print(f"    ⏰ Timeout checking team {team_slug}")
-                            continue
-                        except Exception as e:
-                            print(f"    ⚠️  Error checking team {team_slug}: {e}")
-                            continue
-                else:
-                    print(f"    ❌ Failed to get organization teams: RC={teams_result.returncode}")
-                    if teams_result.stderr:
-                        print(f"    ❌ Error: {teams_result.stderr.strip()}")
-                            
-            except Exception as e:
-                print(f"    ⚠️  Organization teams approach failed: {e}")
-        
-        if not all_teams:
-            print(f"    📝 No team permissions found for {repo_name} after trying both strategies")
+            print(f"    � No team permissions found for {repo_name} using direct repository teams endpoint")
+            print(f"    💡 Repository may not have any team permissions configured, or teams may not be accessible")
         else:
             print(f"    ✅ Found {len(all_teams)} team(s) with access to {repo_name}")
             
