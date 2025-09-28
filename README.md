@@ -45,11 +45,19 @@ To run the pipeline manually:
 
 ### Required Permissions
 
-The workflow uses the default `GITHUB_TOKEN` which needs:
-- `contents: read` - To access repository content
-- `actions: read` - To run the workflow
+The workflow can use either:
+1. **Personal Access Token (PAT)** - **Recommended** for full organization access
+2. **Default GITHUB_TOKEN** - Limited permissions, may miss private repositories
 
-For organization-wide access, you may need to configure additional permissions or use a personal access token.
+#### PAT Setup (Recommended)
+For comprehensive organization reporting, set up a Personal Access Token:
+
+1. **Create PAT**: Follow the [PAT Setup Guide](PAT_SETUP.md)
+2. **Required scopes**: `repo`, `read:org`, `read:user`  
+3. **Add to secrets**: Store as `GITHUB_PAT` in repository secrets
+
+#### Default Token (Limited)
+The workflow falls back to the default `GITHUB_TOKEN` which has restricted access and may not see all repositories.
 
 ### Artifacts
 
@@ -62,7 +70,7 @@ Generated CSV files are automatically uploaded as workflow artifacts with:
 ### Prerequisites
 
 - Python 3.9+
-- GitHub token with appropriate permissions
+- GitHub Personal Access Token (recommended) or GitHub CLI
 
 ### Setup
 
@@ -74,11 +82,14 @@ cd github-reporting
 # Install dependencies
 pip install -r requirements.txt
 
-# Set up GitHub token
+# Set up GitHub token (Option 1: PAT - Recommended)
+export GITHUB_PAT="your_personal_access_token_here"
+
+# Set up GitHub token (Option 2: Default token)
 export GITHUB_TOKEN=$(gh auth token)
-# or
-export GITHUB_TOKEN="your_github_token_here"
 ```
+
+**💡 For comprehensive results**: Use a PAT with `repo`, `read:org`, `read:user` scopes. See [PAT Setup Guide](PAT_SETUP.md) for detailed instructions.
 
 ### Running Locally
 

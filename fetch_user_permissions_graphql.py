@@ -659,14 +659,19 @@ def main():
     summary_output = f"{organization}_user_summary_graphql.csv"
     repo_summary_output = f"{organization}_repository_summary_graphql.csv"
     
-    # Check for GitHub token
-    github_token = os.getenv('GITHUB_TOKEN')
+    # Check for GitHub token (prefer PAT over default GITHUB_TOKEN)
+    github_token = os.getenv('GITHUB_PAT') or os.getenv('GITHUB_TOKEN')
     if not github_token:
-        print("❌ Error: GITHUB_TOKEN environment variable is required.")
-        print("💡 Please set it with: export GITHUB_TOKEN=$(gh auth token)")
+        print("❌ Error: GitHub token is required.")
+        print("💡 For organization access, please set a Personal Access Token:")
+        print("   export GITHUB_PAT='your_personal_access_token'")
+        print("💡 Alternatively, use the default token: export GITHUB_TOKEN=$(gh auth token)")
+        print("")
+        print("🔐 Required PAT scopes: 'repo', 'read:org', 'read:user'")
         sys.exit(1)
     else:
-        print("✅ GitHub token found and loaded")
+        token_type = "PAT" if os.getenv('GITHUB_PAT') else "default token"
+        print(f"✅ GitHub {token_type} found and loaded")
     
     print(f"🏢 Target organization: {organization}")
     print(f"📦 Include archived repositories: {include_archived}")
