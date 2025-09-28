@@ -11,6 +11,7 @@ import csv
 import sys
 import os
 import time
+import subprocess
 from datetime import datetime, timedelta
 import pandas as pd
 from typing import Dict, List, Any, Optional
@@ -370,101 +371,80 @@ class GitHubGraphQLPermissionsFetcher:
         return all_collaborators
 
     def fetch_teams_for_repo(self, repo_name: str, repo_full_name: str) -> List[Dict[str, Any]]:
-        """Fetch teams with access to a specific repository.
+        """Fetch teams with access to a specific repository using GitHub CLI.
         
-        Note: GitHub's GraphQL API doesn't provide a direct way to query team permissions
-        for a specific repository. This function attempts to find teams but may not capture
-        all team permissions accurately.
+        This approach uses 'gh api' to get more accurate team permission data
+        that's not easily available through GraphQL queries.
         """
         try:
-            # Get organization teams that might have access to repositories
-            query = """
-            query($org: String!) {
-                organization(login: $org) {
-                    teams(first: 100) {
-                        totalCount
-                        nodes {
-                            id
-                            name
-                            slug
-                            description
-                            privacy
-                            url
-                            repositories(first: 100) {
-                                totalCount
-                                nodes {
-                                    nameWithOwner
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            """
+            # Check if GitHub CLI is available
+            subprocess.run(['gh', '--version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print(f"    ⚠️  GitHub CLI (gh) not found or not authenticated")
+            print(f"    💡 Install with: brew install gh && gh auth login")
+            return []
+        
+        try:
+            # Use GitHub CLI to get team permissions for the repository
+            # This uses the REST API endpoint through gh cli
+            cmd = [
+                'gh', 'api',
+                f'/repos/{repo_full_name}/teams',
+                '--paginate',
+                '--jq', '.[] | {id: .id, name: .name, slug: .slug, description: .description, privacy: .privacy, permission: .permission, url: .html_url}'
+            ]
             
-            # Split the repo full name into owner and name
-            repo_owner = repo_full_name.split('/')[0] if '/' in repo_full_name else self.organization
+            print(f"    🔍 Querying teams via GitHub CLI for {repo_name}...")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
-            variables = {"org": repo_owner}
-            
-            data = self.execute_graphql_query(query, variables)
-            
-            if not data or 'organization' not in data or not data['organization']:
-                return []
-                
-            org_data = data['organization']
-            teams_info = org_data.get('teams', {})
-            if not teams_info:
+            if result.returncode != 0:
+                if "404" in result.stderr:
+                    print(f"    📝 No team permissions found for {repo_name} (may be expected)")
+                elif "403" in result.stderr:
+                    print(f"    🔒 Access denied for team data on {repo_name} (insufficient permissions)")
+                else:
+                    print(f"    ⚠️  GitHub CLI error for {repo_name}: {result.stderr.strip()}")
                 return []
             
+            # Parse the JSON output from gh cli
             all_teams = []
-            target_repo_full_name = repo_full_name
+            output_lines = result.stdout.strip().split('\n')
             
-            # Process teams and check if they have access to this specific repository
-            nodes = teams_info.get('nodes', [])
-            for team in nodes:
-                if not team:
+            for line in output_lines:
+                if not line.strip():
                     continue
                     
-                slug = team.get('slug')
-                if not slug:
-                    continue
-                
-                # Check if this team has access to the specific repository
-                team_repos = team.get('repositories', {})
-                repo_nodes = team_repos.get('nodes', [])
-                
-                # Find if our target repository is in the team's accessible repositories
-                team_has_access = False
-                
-                for repo_node in repo_nodes:
-                    if repo_node and repo_node.get('nameWithOwner') == target_repo_full_name:
-                        team_has_access = True
-                        break
-                
-                if team_has_access:
+                try:
+                    team_info = json.loads(line)
+                    
                     team_data = {
-                        'login': f"@{repo_owner}/{slug}",
-                        'name': team.get('name', ''),
+                        'login': f"@{self.organization}/{team_info.get('slug', 'unknown')}",
+                        'name': team_info.get('name', ''),
                         'email': '',
                         'avatar_url': '',
-                        'url': team.get('url', ''),
-                        'permission': 'team',  # Generic team permission - exact level not available via GraphQL
+                        'url': team_info.get('url', ''),
+                        'permission': team_info.get('permission', 'unknown').lower(),
                         'type': 'Team',
-                        'id': team.get('id', ''),
+                        'id': str(team_info.get('id', '')),
                         'company': '',
                         'location': '',
-                        'team_slug': slug,
-                        'team_description': team.get('description', ''),
-                        'team_privacy': team.get('privacy', '')
+                        'team_slug': team_info.get('slug', ''),
+                        'team_description': team_info.get('description', ''),
+                        'team_privacy': team_info.get('privacy', '')
                     }
                     all_teams.append(team_data)
+                    
+                except json.JSONDecodeError as e:
+                    print(f"    ⚠️  Failed to parse team data: {e}")
+                    continue
             
             return all_teams
             
+        except subprocess.TimeoutExpired:
+            print(f"    ⏰ Timeout querying teams for {repo_name}")
+            return []
         except Exception as e:
-            print(f"    ⚠️  Warning: Could not fetch team information: {e}")
-            print(f"    📝 Note: GitHub's GraphQL API has limitations for team permission queries")
+            print(f"    ❌ Error fetching teams for {repo_name}: {e}")
             return []
 
     def fetch_repositories_with_collaborators(self, include_archived: bool = False) -> List[Dict[str, Any]]:
@@ -669,9 +649,8 @@ class GitHubGraphQLPermissionsFetcher:
         print(f"\n📝 Note: This report shows DIRECT collaborators and teams only")
         print(f"   • Excludes organization-wide inherited permissions")
         print(f"   • Shows explicit repository-level access grants")
-        print(f"   • Teams are included as separate entries with @org/team format")
-        print(f"   • Team permissions may be incomplete due to GitHub GraphQL API limitations")
-        print(f"   • For complete team audit, consider using GitHub's web interface or REST API")
+        print(f"   • Teams are included with accurate permissions via GitHub CLI")
+        print(f"   • Install GitHub CLI (gh) for complete team permission data")
         
         return all_repos_data
     
@@ -1032,6 +1011,18 @@ def main():
     else:
         token_type = "PAT" if os.getenv('GITHUB_PAT') else "default token"
         print(f"✅ GitHub {token_type} found and loaded")
+    
+    # Check for GitHub CLI (for enhanced team detection)
+    try:
+        result = subprocess.run(['gh', '--version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            print("✅ GitHub CLI found - enhanced team permission detection enabled")
+        else:
+            print("⚠️  GitHub CLI not authenticated - team detection will be limited")
+            print("💡 Run 'gh auth login' for better team permission data")
+    except FileNotFoundError:
+        print("⚠️  GitHub CLI not installed - team detection will be limited")
+        print("💡 Install with: brew install gh && gh auth login")
     
     print(f"🏢 Target organization: {organization}")
     print(f"📦 Include archived repositories: {include_archived}")

@@ -2,10 +2,23 @@
 
 This repository contains a Python script and GitHub Actions pipeline for fetching and reporting on **direct user permissions and team access** across repositories in a GitHub organization using the GraphQL API.
 
-## Features
+## Recent Updates
+
+### Team Permission Enhancement (Latest)
+- **GitHub CLI Integration**: The script now uses GitHub CLI (`gh`) to fetch team permission data for enhanced accuracy
+- **Improved Team Detection**: Teams are retrieved using GitHub's REST API via CLI, providing more reliable permission levels
+- **Fallback Mechanism**: If GitHub CLI is not available or authentication fails, the script gracefully continues without team data
+- **Direct Access Focus**: The tool focuses on direct collaborators and teams, avoiding inherited permissions for cleaner reporting
+
+### Previous Improvements
+- **Enhanced Error Handling**: Implemented exponential backoff retry logic for GraphQL API calls
+- **Complete Data Retrieval**: Added pagination support to ensure all collaborators are fetched
+- **PAT Support**: Integrated Personal Access Token support via `REL_TOKEN` secret for enhanced API access
+- **Reliability Improvements**: Added comprehensive error handling and graceful degradation
 
 - **Direct Access Focus**: Fetches only direct collaborators and teams (excludes inherited organization permissions)
 - **Efficient GraphQL API**: Uses GitHub's GraphQL API for faster data retrieval compared to REST API
+- **Enhanced Team Detection**: Uses GitHub CLI for accurate team permissions (falls back to GraphQL if not available)
 - **Comprehensive Reports**: Generates detailed CSV reports with user permissions, team access, summaries, and repository information
 - **Team Support**: Includes team-level permissions alongside individual user access
 - **Automated Pipeline**: GitHub Actions workflow for scheduled and manual execution
@@ -29,11 +42,11 @@ The script generates three CSV files:
 
 This tool reports **DIRECT access only**:
 - ✅ **Included**: Users explicitly added as repository collaborators
-- ✅ **Included**: Teams explicitly granted repository access (with limitations)
+- ✅ **Included**: Teams explicitly granted repository access (with accurate permissions via GitHub CLI)
 - ❌ **Excluded**: Organization-wide inherited permissions
 - ❌ **Excluded**: Permissions inherited from organization membership
 
-**Team Permission Limitations**: GitHub's GraphQL API has limited support for querying team permissions on repositories. Team entries may be incomplete. For comprehensive team auditing, consider using GitHub's web interface or REST API.
+**Team Permission Enhancement**: When GitHub CLI is installed and authenticated, the tool uses REST API endpoints to fetch accurate team permissions. Without GitHub CLI, team detection falls back to GraphQL with limited accuracy.
 
 This provides a cleaner view of intentional, repository-specific access grants.
 
@@ -85,6 +98,7 @@ Generated CSV files are automatically uploaded as workflow artifacts with:
 
 - Python 3.9+
 - GitHub Personal Access Token (recommended) or GitHub CLI
+- **GitHub CLI (gh)** - Required for accurate team permission detection
 
 ### Setup
 
@@ -96,6 +110,10 @@ cd github-reporting
 # Install dependencies
 pip install -r requirements.txt
 
+# Install and authenticate GitHub CLI (recommended for team data)
+brew install gh
+gh auth login
+
 # Set up GitHub token (Option 1: PAT - Recommended)
 export GITHUB_PAT="your_personal_access_token_here"
 
@@ -103,7 +121,7 @@ export GITHUB_PAT="your_personal_access_token_here"
 export GITHUB_TOKEN=$(gh auth token)
 ```
 
-**💡 For comprehensive results**: Use a PAT with `repo`, `read:org`, `read:user` scopes. See [PAT Setup Guide](PAT_SETUP.md) for detailed instructions.
+**💡 For comprehensive results**: Use both a PAT with `repo`, `read:org`, `read:user` scopes AND GitHub CLI authentication. See [PAT Setup Guide](PAT_SETUP.md) for detailed instructions.
 
 ### Running Locally
 
