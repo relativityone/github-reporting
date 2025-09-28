@@ -382,6 +382,9 @@ class GitHubGraphQLPermissionsFetcher:
             print(f"    ❌ No authentication token available for team queries")
             return []
         
+        # Initialize environment with potential token override
+        env = os.environ.copy()
+        
         try:
             # Check if GitHub CLI is available - it should already be authenticated via gh auth login
             version_result = subprocess.run(['gh', '--version'], capture_output=True, text=True, check=True)
@@ -391,30 +394,52 @@ class GitHubGraphQLPermissionsFetcher:
             print(f"    💡 Install with: brew install gh && gh auth login")
             return []
         
-        # Check GitHub CLI authentication status
+        # Check GitHub CLI authentication status and token availability
         try:
-            auth_result = subprocess.run(['gh', 'auth', 'status'], capture_output=True, text=True, timeout=10)
+            # Check what tokens are available
+            rel_token = os.getenv('REL_TOKEN')
+            github_pat = os.getenv('GITHUB_PAT') 
+            github_token = os.getenv('GITHUB_TOKEN')
+            
+            print(f"    🔧 Token availability:")
+            print(f"    - REL_TOKEN: {'✅ Available' if rel_token else '❌ Not set'}")
+            print(f"    - GITHUB_PAT: {'✅ Available' if github_pat else '❌ Not set'}")
+            print(f"    - GITHUB_TOKEN: {'✅ Available' if github_token else '❌ Not set'}")
+            
+            # If REL_TOKEN is available but GitHub CLI might not be using it, let's set GH_TOKEN temporarily
+            if rel_token:
+                env['GH_TOKEN'] = rel_token
+                print(f"    🔧 Setting GH_TOKEN environment variable for this request")
+            
+            auth_result = subprocess.run(['gh', 'auth', 'status'], capture_output=True, text=True, timeout=10, env=env)
             if auth_result.returncode != 0:
                 print(f"    🔐 GitHub CLI auth status: {auth_result.stderr.strip()}")
             else:
                 print(f"    ✅ GitHub CLI authenticated")
             
-            # Test basic API access via GitHub CLI
+            # Test basic API access via GitHub CLI with explicit token
             test_result = subprocess.run(['gh', 'api', '/user', '--jq', '.login'], 
-                                       capture_output=True, text=True, timeout=10)
+                                       capture_output=True, text=True, timeout=10, env=env)
             if test_result.returncode == 0:
                 username = test_result.stdout.strip()
                 print(f"    ✅ GitHub CLI authenticated as user: {username}")
             else:
                 print(f"    ❌ GitHub CLI authentication test failed: {test_result.stderr.strip()}")
                 print(f"    💡 This may indicate insufficient token permissions")
+                # If auth failed with REL_TOKEN, fall back to default environment  
+                if 'GH_TOKEN' in env:
+                    print(f"    🔧 Falling back to default GitHub CLI authentication")
+                    env = os.environ.copy()
                 
         except Exception as e:
             print(f"    ⚠️  Could not check auth status: {e}")
+            # Ensure env is always defined
+            env = os.environ.copy()
         
         print(f"    🔍 Querying teams via GitHub CLI for {repo_full_name}...")
         all_teams = []
         
+        # Use the env we set up in the authentication section
         # Strategy 1: Try the direct repo teams endpoint
         try:
             cmd = [
@@ -424,7 +449,7 @@ class GitHubGraphQLPermissionsFetcher:
                 '--jq', '.[] | {id: .id, name: .name, slug: .slug, description: .description, privacy: .privacy, permission: .permission, url: .html_url}'
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
             
             print(f"    🔧 Direct endpoint - Return code: {result.returncode}")
             if result.stderr:
