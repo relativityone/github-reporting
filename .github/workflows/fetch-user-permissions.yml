@@ -118,6 +118,7 @@ jobs:
           echo "✅ GITHUB_PAT available (${#GITHUB_PAT} chars)"
         else
           echo "❌ GITHUB_PAT not available"
+        fi
         
         if [ -n "$REL_TOKEN" ]; then
           echo "🔐 Using Personal Access Token (REL_TOKEN) for enhanced permissions"
