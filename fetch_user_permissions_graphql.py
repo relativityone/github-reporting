@@ -29,47 +29,127 @@ class GitHubGraphQLPermissionsFetcher:
         self.total_queries = 0
         self.start_time = datetime.now()
         
-    def execute_graphql_query(self, query: str, variables: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Execute a GraphQL query with proper error handling and rate limiting."""
+    def execute_graphql_query(self, query: str, variables: Dict[str, Any] = None, max_retries: int = 3) -> Dict[str, Any]:
+        """Execute a GraphQL query with proper error handling, rate limiting, and retry logic."""
         payload = {
             "query": query,
             "variables": variables or {}
         }
         
-        self.wait_for_rate_limit()
-        
-        response = requests.post(self.base_url, headers=self.headers, json=payload)
-        self.total_queries += 1
-        
-        # Update rate limit info from response headers
-        self.rate_limit_remaining = int(response.headers.get('X-RateLimit-Remaining', 0))
-        self.rate_limit_reset = int(response.headers.get('X-RateLimit-Reset', 0))
-        
-        if response.status_code != 200:
-            print(f"❌ GraphQL request failed with status {response.status_code}")
-            print(f"Response: {response.text}")
-            return {}
-            
-        data = response.json()
-        
-        if 'errors' in data:
-            # Handle different types of errors
-            forbidden_errors = [e for e in data['errors'] if e.get('type') == 'FORBIDDEN']
-            other_errors = [e for e in data['errors'] if e.get('type') != 'FORBIDDEN']
-            
-            if forbidden_errors:
-                print(f"⚠️  Access denied for {len(forbidden_errors)} repositories (insufficient permissions)")
-                print("   This is normal for private repositories your token cannot access")
-            
-            if other_errors:
-                print(f"❌ GraphQL errors: {other_errors}")
+        for attempt in range(max_retries + 1):
+            try:
+                self.wait_for_rate_limit()
                 
-            # Only return empty if we have no data and non-forbidden errors
-            if 'data' not in data and other_errors:
+                # Add timeout to prevent hanging requests
+                response = requests.post(self.base_url, headers=self.headers, json=payload, timeout=60)
+                self.total_queries += 1
+                
+                # Update rate limit info from response headers
+                self.rate_limit_remaining = int(response.headers.get('X-RateLimit-Remaining', 0))
+                self.rate_limit_reset = int(response.headers.get('X-RateLimit-Reset', 0))
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if 'errors' in data:
+                        # Handle different types of errors
+                        forbidden_errors = [e for e in data['errors'] if e.get('type') == 'FORBIDDEN']
+                        other_errors = [e for e in data['errors'] if e.get('type') != 'FORBIDDEN']
+                        
+                        if forbidden_errors:
+                            print(f"⚠️  Access denied for {len(forbidden_errors)} repositories (insufficient permissions)")
+                            print("   This is normal for private repositories your token cannot access")
+                        
+                        if other_errors:
+                            print(f"❌ GraphQL errors: {other_errors}")
+                            
+                        # Only return empty if we have no data and non-forbidden errors
+                        if 'data' not in data and other_errors:
+                            return {}
+                            
+                    return data.get('data', {})
+                
+                # Handle server errors with retry
+                elif response.status_code in [502, 503, 504, 520, 521, 522, 524]:
+                    if attempt < max_retries:
+                        wait_time = (2 ** attempt) + 1  # Exponential backoff: 2, 5, 9 seconds
+                        print(f"⚠️  Server error {response.status_code}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries + 1})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"❌ GraphQL request failed after {max_retries + 1} attempts with status {response.status_code}")
+                        print(f"Response: {response.text[:500]}..." if len(response.text) > 500 else f"Response: {response.text}")
+                        return {}
+                
+                # Handle other HTTP errors
+                else:
+                    print(f"❌ GraphQL request failed with status {response.status_code}")
+                    print(f"Response: {response.text[:500]}..." if len(response.text) > 500 else f"Response: {response.text}")
+                    return {}
+                    
+            except requests.exceptions.Timeout:
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) + 1
+                    print(f"⏰ Request timeout, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries + 1})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"❌ Request timed out after {max_retries + 1} attempts")
+                    return {}
+                    
+            except requests.exceptions.ConnectionError as e:
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) + 1
+                    print(f"🔌 Connection error, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries + 1})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"❌ Connection failed after {max_retries + 1} attempts: {e}")
+                    return {}
+                    
+            except Exception as e:
+                print(f"❌ Unexpected error during GraphQL request: {e}")
                 return {}
                 
-        return data.get('data', {})
+        return {}
     
+    def test_api_connection(self) -> bool:
+        """Test basic API connectivity and authentication before starting main process."""
+        query = """
+        query {
+            viewer {
+                login
+                id
+            }
+            rateLimit {
+                limit
+                remaining
+                resetAt
+            }
+        }
+        """
+        
+        print("🔗 Testing GitHub API connection and authentication...")
+        try:
+            data = self.execute_graphql_query(query, max_retries=2)
+            
+            if not data or 'viewer' not in data:
+                print("❌ API connection test failed")
+                return False
+                
+            viewer = data['viewer']
+            rate_limit = data.get('rateLimit', {})
+            
+            print(f"✅ API connection successful")
+            print(f"👤 Authenticated as: {viewer.get('login', 'unknown')}")
+            print(f"🔄 Rate limit: {rate_limit.get('remaining', 'unknown')}/{rate_limit.get('limit', 'unknown')}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ API connection test failed: {e}")
+            return False
+
     def check_token_permissions(self) -> bool:
         """Check if the token has the necessary permissions for the organization."""
         query = """
@@ -242,15 +322,30 @@ class GitHubGraphQLPermissionsFetcher:
             
             variables = {
                 "org": self.organization,
-                "first": 50,  # Fetch 50 repos per page to balance efficiency and completeness
+                "first": 25,  # Reduced from 50 to 25 to avoid large query timeouts
                 "after": after_cursor
             }
             
+            print(f"🔄 Executing GraphQL query (attempt may include retries)...")
             data = self.execute_graphql_query(query, variables)
             
-            if not data or 'organization' not in data:
-                print("❌ Failed to fetch repository data")
-                break
+            if not data:
+                print(f"⚠️  No data returned for page {page_num}, this might be due to server errors.")
+                if page_num == 1:
+                    print("❌ Failed to fetch any repository data - stopping")
+                    break
+                else:
+                    print("⚠️  Continuing with partial data from previous pages")
+                    break
+            
+            if 'organization' not in data:
+                print("❌ No organization data in response")
+                if page_num == 1:
+                    print("❌ Failed to access organization - stopping")
+                    break
+                else:
+                    print("⚠️  Continuing with partial data from previous pages")
+                    break
                 
             org_data = data['organization']
             if not org_data or 'repositories' not in org_data:
@@ -349,8 +444,19 @@ class GitHubGraphQLPermissionsFetcher:
             after_cursor = page_info['endCursor']
             page_num += 1
             
-            # Small delay between pages
-            time.sleep(0.5)
+            # Small delay between pages to avoid overwhelming the API
+            if has_next_page:
+                print(f"⏳ Pausing 2 seconds before next page to ensure API stability...")
+                time.sleep(2)
+        
+        if not all_repos_data:
+            print("\n❌ No repository data was successfully fetched!")
+            print("💡 This might be due to:")
+            print("   • Network connectivity issues")
+            print("   • GitHub API server problems (502/503/504 errors)")
+            print("   • Insufficient token permissions")
+            print("   • Organization access restrictions")
+            return []
         
         elapsed_time = datetime.now() - self.start_time
         print(f"\n🎉 REPOSITORY FETCH COMPLETE!")
@@ -679,7 +785,13 @@ def main():
     # Initialize fetcher
     fetcher = GitHubGraphQLPermissionsFetcher(github_token, organization)
     
-    # Check token permissions first
+    # Test API connection first
+    if not fetcher.test_api_connection():
+        print("❌ Cannot establish connection to GitHub API")
+        print("💡 Please check your internet connection and try again")
+        sys.exit(1)
+    
+    # Check token permissions
     if not fetcher.check_token_permissions():
         print("❌ Token validation failed. Please check your permissions.")
         print("💡 Required permissions: 'repo', 'read:org' scopes")
