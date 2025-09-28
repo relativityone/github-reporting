@@ -54,7 +54,7 @@ For comprehensive organization reporting, set up a Personal Access Token:
 
 1. **Create PAT**: Follow the [PAT Setup Guide](PAT_SETUP.md)
 2. **Required scopes**: `repo`, `read:org`, `read:user`  
-3. **Add to secrets**: Store as `GITHUB_PAT` in repository secrets
+3. **Add to secrets**: Store as `REL_TOKEN` in repository secrets
 
 #### Default Token (Limited)
 The workflow falls back to the default `GITHUB_TOKEN` which has restricted access and may not see all repositories.

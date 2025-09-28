@@ -33,7 +33,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-      # Note: For full organization access, configure a GITHUB_PAT secret
+      # Note: For full organization access, configure a REL_TOKEN secret
       # with 'repo', 'read:org', 'read:user' scopes
     
     steps:
@@ -78,7 +78,7 @@ jobs:
     
     - name: Run user permissions fetcher
       env:
-        GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+        GITHUB_PAT: ${{ secrets.REL_TOKEN }}
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         echo "🚀 Starting GitHub user permissions fetch"
@@ -86,10 +86,10 @@ jobs:
         echo "📦 Include archived: $INCLUDE_ARCHIVED"
         
         if [ -n "$GITHUB_PAT" ]; then
-          echo "🔐 Using Personal Access Token for enhanced permissions"
+          echo "🔐 Using Personal Access Token (REL_TOKEN) for enhanced permissions"
         else
           echo "⚠️  Using default GITHUB_TOKEN (limited permissions)"
-          echo "💡 For better results, add a GITHUB_PAT secret to this repository"
+          echo "💡 For better results, add a REL_TOKEN secret to this repository"
         fi
         
         python fetch_user_permissions_graphql.py

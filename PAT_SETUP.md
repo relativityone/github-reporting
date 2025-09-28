@@ -44,7 +44,7 @@ A Personal Access Token (PAT) with proper scopes provides full organizational ac
 2. Go to **Settings** → **Secrets and variables** → **Actions**
 3. Click **"New repository secret"**
 4. Add the secret:
-   - **Name**: `GITHUB_PAT`
+   - **Name**: `REL_TOKEN`
    - **Value**: `[paste your PAT here]`
 5. Click **"Add secret"**
 
@@ -53,7 +53,7 @@ A Personal Access Token (PAT) with proper scopes provides full organizational ac
 For organization-wide use:
 1. Go to RelativityOne organization settings
 2. Navigate to **Secrets and variables** → **Actions**
-3. Add organization secret with same name: `GITHUB_PAT`
+3. Add organization secret with same name: `REL_TOKEN`
 
 ## Local Development Setup
 
