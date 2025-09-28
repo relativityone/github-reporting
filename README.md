@@ -1,11 +1,13 @@
-# GitHub User Permissions Reporter
+# GitHub Direct Access Permissions Reporter
 
-This repository contains a Python script and GitHub Actions pipeline for fetching and reporting on user permissions across repositories in a GitHub organization using the GraphQL API.
+This repository contains a Python script and GitHub Actions pipeline for fetching and reporting on **direct user permissions and team access** across repositories in a GitHub organization using the GraphQL API.
 
 ## Features
 
+- **Direct Access Focus**: Fetches only direct collaborators and teams (excludes inherited organization permissions)
 - **Efficient GraphQL API**: Uses GitHub's GraphQL API for faster data retrieval compared to REST API
-- **Comprehensive Reports**: Generates detailed CSV reports with user permissions, summaries, and repository information
+- **Comprehensive Reports**: Generates detailed CSV reports with user permissions, team access, summaries, and repository information
+- **Team Support**: Includes team-level permissions alongside individual user access
 - **Automated Pipeline**: GitHub Actions workflow for scheduled and manual execution
 - **Flexible Configuration**: Support for including/excluding archived repositories and custom organizations
 
@@ -19,9 +21,19 @@ This repository contains a Python script and GitHub Actions pipeline for fetchin
 
 The script generates three CSV files:
 
-1. **{organization}_user_permissions_graphql.csv** - Detailed user-to-repository permissions mapping
-2. **{organization}_user_summary_graphql.csv** - Summary of each user's access across repositories
-3. **{organization}_repository_summary_graphql.csv** - Summary of each repository with collaborator counts
+1. **{organization}_direct_permissions_graphql.csv** - Detailed direct access permissions mapping (users and teams)
+2. **{organization}_direct_summary_graphql.csv** - Summary of each user's and team's access across repositories  
+3. **{organization}_repository_summary_graphql.csv** - Summary of each repository with direct collaborator counts
+
+### Direct Access Focus
+
+This tool reports **DIRECT access only**:
+- ✅ **Included**: Users explicitly added as repository collaborators
+- ✅ **Included**: Teams explicitly granted repository access  
+- ❌ **Excluded**: Organization-wide inherited permissions
+- ❌ **Excluded**: Permissions inherited from organization membership
+
+This provides a cleaner view of intentional, repository-specific access grants.
 
 ## GitHub Actions Pipeline
 

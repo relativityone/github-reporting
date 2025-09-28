@@ -261,7 +261,7 @@ class GitHubGraphQLPermissionsFetcher:
             query = """
             query($repo_owner: String!, $repo_name: String!, $first: Int!, $after: String) {
                 repository(owner: $repo_owner, name: $repo_name) {
-                    collaborators(first: $first, after: $after, affiliation: ALL) {
+                    collaborators(first: $first, after: $after, affiliation: DIRECT) {
                         totalCount
                         pageInfo {
                             hasNextPage
@@ -368,6 +368,95 @@ class GitHubGraphQLPermissionsFetcher:
             print(f"    ✅ {repo_name}: Retrieved all {total_found} collaborators ({page_num-1} pages)")
             
         return all_collaborators
+
+    def fetch_teams_for_repo(self, repo_name: str, repo_full_name: str) -> List[Dict[str, Any]]:
+        """Fetch all teams with access to a specific repository."""
+        query = """
+        query($repo_owner: String!, $repo_name: String!) {
+            repository(owner: $repo_owner, name: $repo_name) {
+                name
+                collaboratoringTeams(first: 100) {
+                    totalCount
+                    nodes {
+                        id
+                        name
+                        slug
+                        description
+                        privacy
+                        url
+                        membersUrl
+                        repositoriesUrl
+                    }
+                    edges {
+                        permission
+                        node {
+                            name
+                            slug
+                        }
+                    }
+                }
+            }
+        }
+        """
+        
+        # Split the repo full name into owner and name
+        repo_owner = repo_full_name.split('/')[0] if '/' in repo_full_name else self.organization
+        
+        variables = {
+            "repo_owner": repo_owner,
+            "repo_name": repo_name
+        }
+        
+        data = self.execute_graphql_query(query, variables)
+        
+        if not data or 'repository' not in data or not data['repository']:
+            return []
+            
+        teams_data = data['repository'].get('collaboratoringTeams', {})
+        if not teams_data:
+            return []
+        
+        all_teams = []
+        
+        # Map team nodes to edges (which contain permissions)
+        team_map = {}
+        edges = teams_data.get('edges', [])
+        for edge in edges:
+            if edge and edge.get('node') and edge['node'].get('slug'):
+                slug = edge['node']['slug']
+                permission = edge.get('permission', 'unknown')
+                team_map[slug] = permission
+
+        # Process team details
+        nodes = teams_data.get('nodes', [])
+        for team in nodes:
+            if not team:
+                continue
+                
+            slug = team.get('slug')
+            if not slug:
+                continue
+                
+            permission = team_map.get(slug, 'unknown')
+            
+            team_data = {
+                'login': f"@{self.organization}/{slug}",  # Format as @org/team-name
+                'name': team.get('name', ''),
+                'email': '',  # Teams don't have email
+                'avatar_url': '',  # Teams don't have avatars in this context
+                'url': team.get('url', ''),
+                'permission': permission,
+                'type': 'Team',
+                'id': team.get('id', ''),
+                'company': '',  # Teams don't have company
+                'location': '',  # Teams don't have location
+                'team_slug': slug,
+                'team_description': team.get('description', ''),
+                'team_privacy': team.get('privacy', '')
+            }
+            all_teams.append(team_data)
+        
+        return all_teams
 
     def fetch_repositories_with_collaborators(self, include_archived: bool = False) -> List[Dict[str, Any]]:
         """
@@ -477,20 +566,38 @@ class GitHubGraphQLPermissionsFetcher:
                     'collaborators': []
                 }
                 
-                # Fetch all collaborators for this repository with proper pagination
-                print(f"  🔍 Fetching collaborators for {repo['name']}...")
+                # Fetch direct collaborators for this repository
+                print(f"  � Fetching direct collaborators for {repo['name']}...")
+                collaborators = []
                 try:
                     collaborators = self.fetch_all_collaborators_for_repo(repo['name'], repo['nameWithOwner'])
-                    repo_data['collaborators'] = collaborators
-                    
                     if collaborators:
-                        print(f"    ✅ Found {len(collaborators)} collaborators")
+                        print(f"    ✅ Found {len(collaborators)} direct collaborators")
                     else:
-                        print(f"    ⚠️  No collaborators found (may be access restricted)")
-                        
+                        print(f"    👤 No direct collaborators found")
                 except Exception as e:
                     print(f"    ❌ Failed to fetch collaborators: {e}")
-                    repo_data['collaborators'] = []
+                
+                # Fetch teams with access to this repository
+                print(f"  👥 Fetching teams for {repo['name']}...")
+                teams = []
+                try:
+                    teams = self.fetch_teams_for_repo(repo['name'], repo['nameWithOwner'])
+                    if teams:
+                        print(f"    ✅ Found {len(teams)} teams with access")
+                    else:
+                        print(f"    👥 No teams found with access")
+                except Exception as e:
+                    print(f"    ❌ Failed to fetch teams: {e}")
+                
+                # Combine collaborators and teams
+                repo_data['collaborators'] = collaborators + teams
+                total_access = len(collaborators) + len(teams)
+                
+                if total_access > 0:
+                    print(f"    📋 Total access entries: {total_access} ({len(collaborators)} users + {len(teams)} teams)")
+                else:
+                    print(f"    ⚠️  No direct access found (may be access restricted or owner-only)")
                 
                 all_repos_data.append(repo_data)
                 processed_repos += 1
@@ -525,25 +632,35 @@ class GitHubGraphQLPermissionsFetcher:
         print(f"⏱️  Total fetch time: {elapsed_time}")
         
         # Calculate comprehensive statistics
-        total_collaborators = sum(len(repo['collaborators']) for repo in all_repos_data)
-        repos_with_collabs = sum(1 for repo in all_repos_data if repo['collaborators'])
-        repos_without_collabs = len(all_repos_data) - repos_with_collabs
+        total_access_entries = sum(len(repo['collaborators']) for repo in all_repos_data)
+        total_users = sum(len([c for c in repo['collaborators'] if c['type'] != 'Team']) for repo in all_repos_data)
+        total_teams = sum(len([c for c in repo['collaborators'] if c['type'] == 'Team']) for repo in all_repos_data)
+        repos_with_access = sum(1 for repo in all_repos_data if repo['collaborators'])
+        repos_without_access = len(all_repos_data) - repos_with_access
         
-        print(f"📊 Final statistics:")
+        print(f"📊 Final statistics (DIRECT access only):")
         print(f"   • Repositories processed: {len(all_repos_data):,}")
-        print(f"   • Repositories with collaborators: {repos_with_collabs:,}")
-        print(f"   • Repositories without collaborators: {repos_without_collabs:,}")
-        print(f"   • Total collaborator records: {total_collaborators:,}")
+        print(f"   • Repositories with direct access: {repos_with_access:,}")
+        print(f"   • Repositories without direct access: {repos_without_access:,}")
+        print(f"   • Total direct access entries: {total_access_entries:,}")
+        print(f"   • Direct user collaborators: {total_users:,}")
+        print(f"   • Team collaborators: {total_teams:,}")
         print(f"   • Total GraphQL queries: {self.total_queries:,}")
-        print(f"   • Average collaborators per repo: {total_collaborators/max(len(all_repos_data),1):.1f}")
+        print(f"   • Average access entries per repo: {total_access_entries/max(len(all_repos_data),1):.1f}")
         print(f"   • Average processing time per repo: {elapsed_time.total_seconds()/max(len(all_repos_data),1):.2f}s")
         
-        if repos_without_collabs > 0:
-            print(f"\n⚠️  {repos_without_collabs} repositories have no collaborator data")
+        if repos_without_access > 0:
+            print(f"\n⚠️  {repos_without_access} repositories have no direct access data")
             print("   This may be due to:")
+            print("   • Owner-only repositories (no additional collaborators)")
             print("   • Private repositories you cannot access")
-            print("   • Repositories with no explicit collaborators (owner-only)")
+            print("   • Repositories with only inherited organization permissions")
             print("   • API permission restrictions")
+        
+        print(f"\n📝 Note: This report shows DIRECT collaborators and teams only")
+        print(f"   • Excludes organization-wide inherited permissions")
+        print(f"   • Shows explicit repository-level access grants")
+        print(f"   • Teams are included as separate entries with @org/team format")
         
         return all_repos_data
     
@@ -763,13 +880,11 @@ class GitHubGraphQLPermissionsFetcher:
         unique_users = len(set(p['username'] for p in permissions_data))
         unique_repos = len(repos_data)
         
-        # Count by permission level
+        # Count by permission level and user type
         permission_counts = {}
         user_types = {}
-        repo_characteristics = {
-            'private': 0, 'public': 0, 'archived': 0, 'active': 0, 
-            'fork': 0, 'original': 0, 'disabled': 0, 'enabled': 0
-        }
+        team_count = 0
+        user_count = 0
         
         for perm in permissions_data:
             perm_level = perm['permission']
@@ -777,6 +892,17 @@ class GitHubGraphQLPermissionsFetcher:
             
             user_type = perm['user_type']
             user_types[user_type] = user_types.get(user_type, 0) + 1
+            
+            if user_type == 'Team':
+                team_count += 1
+            else:
+                user_count += 1
+        
+        # Count repository characteristics
+        repo_characteristics = {
+            'private': 0, 'public': 0, 'archived': 0, 'active': 0, 
+            'fork': 0, 'original': 0, 'disabled': 0, 'enabled': 0
+        }
         
         for repo in repos_data:
             if repo['is_private']:
@@ -808,11 +934,12 @@ class GitHubGraphQLPermissionsFetcher:
         print(f"🔄 Total GraphQL queries: {self.total_queries:,}")
         print(f"📊 Processing efficiency: {total_permissions/max(self.total_queries,1):.1f} records per query")
         
-        print(f"\n📈 DATA SUMMARY:")
-        print(f"   • Total permission records: {total_permissions:,}")
-        print(f"   • Unique users: {unique_users:,}")
+        print(f"\n📈 DATA SUMMARY (DIRECT ACCESS ONLY):")
+        print(f"   • Total access records: {total_permissions:,}")
+        print(f"   • Unique users: {user_count:,}")
+        print(f"   • Team entries: {team_count:,}")
         print(f"   • Repositories processed: {unique_repos:,}")
-        print(f"   • Average collaborators per repo: {total_permissions/max(unique_repos,1):.1f}")
+        print(f"   • Average access entries per repo: {total_permissions/max(unique_repos,1):.1f}")
         
         print(f"\n🔐 Permission Levels:")
         for perm, count in sorted(permission_counts.items(), key=lambda x: x[1], reverse=True):
@@ -866,9 +993,10 @@ class GitHubGraphQLPermissionsFetcher:
 
 
 def main():
-    print("🚀 GITHUB GRAPHQL PERMISSIONS FETCHER")
+    print("🚀 GITHUB DIRECT ACCESS PERMISSIONS FETCHER")
     print("=" * 80)
-    print("🎯 This script uses GitHub's GraphQL API for efficient data retrieval")
+    print("🎯 This script fetches DIRECT collaborators and teams only (no inherited permissions)")
+    print("🔍 Uses GitHub's GraphQL API for efficient data retrieval")
     print(f"📅 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Configuration
@@ -876,8 +1004,8 @@ def main():
     include_archived = False  # Set to True to include archived repositories
     
     # Output files
-    permissions_output = f"{organization}_user_permissions_graphql.csv"
-    summary_output = f"{organization}_user_summary_graphql.csv"
+    permissions_output = f"{organization}_direct_permissions_graphql.csv"
+    summary_output = f"{organization}_direct_summary_graphql.csv"
     repo_summary_output = f"{organization}_repository_summary_graphql.csv"
     
     # Check for GitHub token (prefer PAT over default GITHUB_TOKEN)
@@ -941,14 +1069,15 @@ def main():
         # Print final summary
         fetcher.print_summary(permissions_data, repos_data)
         
-        print(f"\n🎉 GRAPHQL PERMISSIONS ANALYSIS COMPLETE!")
+        print(f"\n🎉 DIRECT ACCESS PERMISSIONS ANALYSIS COMPLETE!")
         print(f"⏱️  Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         print(f"\n📁 Files created:")
-        print(f"   • {permissions_output} - Detailed user-to-repository permissions")
-        print(f"   • {summary_output} - User summary with permission counts")
-        print(f"   • {repo_summary_output} - Repository summary with collaborator counts")
-        print(f"\n🚀 GraphQL API provided significant performance improvement over REST API!")
+        print(f"   • {permissions_output} - Detailed direct access permissions (users + teams)")
+        print(f"   • {summary_output} - User and team summary with permission counts")
+        print(f"   • {repo_summary_output} - Repository summary with direct collaborator counts")
+        print(f"\n🎯 Note: This report contains DIRECT access only (excludes inherited org permissions)")
+        print(f"🚀 GraphQL API provided significant performance improvement over REST API!")
         
     except KeyboardInterrupt:
         print(f"\n⏸️  Processing interrupted by user")
