@@ -53,11 +53,74 @@ class GitHubGraphQLPermissionsFetcher:
         data = response.json()
         
         if 'errors' in data:
-            print(f"❌ GraphQL errors: {data['errors']}")
-            if 'data' not in data:
+            # Handle different types of errors
+            forbidden_errors = [e for e in data['errors'] if e.get('type') == 'FORBIDDEN']
+            other_errors = [e for e in data['errors'] if e.get('type') != 'FORBIDDEN']
+            
+            if forbidden_errors:
+                print(f"⚠️  Access denied for {len(forbidden_errors)} repositories (insufficient permissions)")
+                print("   This is normal for private repositories your token cannot access")
+            
+            if other_errors:
+                print(f"❌ GraphQL errors: {other_errors}")
+                
+            # Only return empty if we have no data and non-forbidden errors
+            if 'data' not in data and other_errors:
                 return {}
                 
         return data.get('data', {})
+    
+    def check_token_permissions(self) -> bool:
+        """Check if the token has the necessary permissions for the organization."""
+        query = """
+        query($org: String!) {
+            organization(login: $org) {
+                login
+                viewerCanAdminister
+                viewerIsAMember
+                membersWithRole(first: 1) {
+                    totalCount
+                }
+            }
+            viewer {
+                login
+                organizations(first: 100) {
+                    nodes {
+                        login
+                    }
+                }
+            }
+        }
+        """
+        
+        print(f"🔍 Checking token permissions for organization: {self.organization}...")
+        data = self.execute_graphql_query(query, {"org": self.organization})
+        
+        if not data or 'viewer' not in data:
+            print("❌ Failed to validate token permissions")
+            return False
+            
+        viewer = data['viewer']
+        org_data = data.get('organization')
+        
+        print(f"✅ Token belongs to user: {viewer.get('login', 'unknown')}")
+        
+        if not org_data:
+            print(f"❌ Organization '{self.organization}' not found or not accessible")
+            user_orgs = [org['login'] for org in viewer.get('organizations', {}).get('nodes', [])]
+            if user_orgs:
+                print(f"💡 Available organizations: {', '.join(user_orgs[:10])}")
+            return False
+            
+        print(f"✅ Organization access: {self.organization}")
+        print(f"📊 Member status: {'Member' if org_data.get('viewerIsAMember') else 'External'}")
+        print(f"🔐 Admin access: {'Yes' if org_data.get('viewerCanAdminister') else 'No'}")
+        
+        if not org_data.get('viewerIsAMember'):
+            print("⚠️  Warning: You are not a member of this organization")
+            print("   Some private repositories may not be accessible")
+            
+        return True
     
     def check_rate_limit(self) -> bool:
         """Check current GraphQL rate limit status."""
@@ -145,7 +208,7 @@ class GitHubGraphQLPermissionsFetcher:
                             isDisabled
                             updatedAt
                             createdAt
-                            collaborators(first: 1060, affiliation: ALL) {
+                            collaborators(first: 100, affiliation: ALL) {
                                 totalCount
                                 pageInfo {
                                     hasNextPage
@@ -202,9 +265,16 @@ class GitHubGraphQLPermissionsFetcher:
             print(f"📊 Total repositories in org: {repos['totalCount']:,}")
             
             # Process each repository
+            processed_repos = 0
+            skipped_repos = 0
             for repo in repo_nodes:
+                # Skip if repo data is incomplete (access denied)
+                if not repo or not repo.get('name'):
+                    skipped_repos += 1
+                    continue
+                    
                 # Filter archived repositories if not including them
-                if not include_archived and repo['isArchived']:
+                if not include_archived and repo.get('isArchived', False):
                     continue
                     
                 repo_data = {
@@ -219,24 +289,35 @@ class GitHubGraphQLPermissionsFetcher:
                     'collaborators': []
                 }
                 
-                # Process collaborators
-                collaborators_data = repo['collaborators']
-                total_collaborators = collaborators_data['totalCount']
+                # Process collaborators (handle cases where data might be missing due to permissions)
+                collaborators_data = repo.get('collaborators', {})
+                if not collaborators_data:
+                    print(f"⚠️  No collaborator data for {repo['name']} (likely access denied)")
+                    # Create repo entry with empty collaborators list
+                    repo_data['collaborators'] = []
+                    all_repos_data.append(repo_data)
+                    processed_repos += 1
+                    continue
+                    
+                total_collaborators = collaborators_data.get('totalCount', 0)
                 
                 # Handle case where there are more than 100 collaborators
                 if collaborators_data['pageInfo']['hasNextPage']:
                     print(f"⚠️  Repository {repo['name']} has {total_collaborators} collaborators (>100)")
-                    print("   Note: Only first 100 collaborators fetched per repository")
+                    print("   Note: Only first 100 collaborators fetched per repository (GitHub API limit)")
                 
                 # Map collaborator nodes to edges (which contain permissions)
                 collaborator_map = {}
-                for edge in collaborators_data['edges']:
-                    login = edge['node']['login']
-                    permission = edge['permission']
-                    collaborator_map[login] = permission
-                
+                edges = collaborators_data.get('edges', [])
+                for edge in edges:
+                    if edge and edge.get('node') and edge['node'].get('login'):
+                        login = edge['node']['login']
+                        permission = edge.get('permission', 'unknown')
+                        collaborator_map[login] = permission
+
                 # Process collaborator details
-                for collaborator in collaborators_data['nodes']:
+                nodes = collaborators_data.get('nodes', [])
+                for collaborator in nodes:
                     login = collaborator['login']
                     permission = collaborator_map.get(login, 'unknown')
                     
@@ -255,7 +336,10 @@ class GitHubGraphQLPermissionsFetcher:
                     repo_data['collaborators'].append(collaborator_data)
                 
                 all_repos_data.append(repo_data)
+                processed_repos += 1
                 
+            if skipped_repos > 0:
+                print(f"⚠️  Skipped {skipped_repos} repositories due to access restrictions")
             print(f"📈 Progress: Processed {len(all_repos_data)} repositories so far")
             print(f"🔄 GraphQL queries made: {self.total_queries}")
             print(f"📊 Rate limit remaining: {self.rate_limit_remaining}")
@@ -589,6 +673,12 @@ def main():
     
     # Initialize fetcher
     fetcher = GitHubGraphQLPermissionsFetcher(github_token, organization)
+    
+    # Check token permissions first
+    if not fetcher.check_token_permissions():
+        print("❌ Token validation failed. Please check your permissions.")
+        print("💡 Required permissions: 'repo', 'read:org' scopes")
+        sys.exit(1)
     
     print(f"\n⚠️  ESTIMATED TIME: 10-30 minutes (much faster than REST API)")
     print(f"🚀 GraphQL queries needed: ~50-200 queries vs 3000+ REST API calls")
