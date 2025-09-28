@@ -29,9 +29,11 @@ The script generates three CSV files:
 
 This tool reports **DIRECT access only**:
 - ✅ **Included**: Users explicitly added as repository collaborators
-- ✅ **Included**: Teams explicitly granted repository access  
+- ✅ **Included**: Teams explicitly granted repository access (with limitations)
 - ❌ **Excluded**: Organization-wide inherited permissions
 - ❌ **Excluded**: Permissions inherited from organization membership
+
+**Team Permission Limitations**: GitHub's GraphQL API has limited support for querying team permissions on repositories. Team entries may be incomplete. For comprehensive team auditing, consider using GitHub's web interface or REST API.
 
 This provides a cleaner view of intentional, repository-specific access grants.
 

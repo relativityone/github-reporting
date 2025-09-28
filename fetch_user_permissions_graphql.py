@@ -370,93 +370,102 @@ class GitHubGraphQLPermissionsFetcher:
         return all_collaborators
 
     def fetch_teams_for_repo(self, repo_name: str, repo_full_name: str) -> List[Dict[str, Any]]:
-        """Fetch all teams with access to a specific repository."""
-        query = """
-        query($repo_owner: String!, $repo_name: String!) {
-            repository(owner: $repo_owner, name: $repo_name) {
-                name
-                collaboratoringTeams(first: 100) {
-                    totalCount
-                    nodes {
-                        id
-                        name
-                        slug
-                        description
-                        privacy
-                        url
-                        membersUrl
-                        repositoriesUrl
-                    }
-                    edges {
-                        permission
-                        node {
+        """Fetch teams with access to a specific repository.
+        
+        Note: GitHub's GraphQL API doesn't provide a direct way to query team permissions
+        for a specific repository. This function attempts to find teams but may not capture
+        all team permissions accurately.
+        """
+        try:
+            # Get organization teams that might have access to repositories
+            query = """
+            query($org: String!) {
+                organization(login: $org) {
+                    teams(first: 100) {
+                        totalCount
+                        nodes {
+                            id
                             name
                             slug
+                            description
+                            privacy
+                            url
+                            repositories(first: 100) {
+                                totalCount
+                                nodes {
+                                    nameWithOwner
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
-        """
-        
-        # Split the repo full name into owner and name
-        repo_owner = repo_full_name.split('/')[0] if '/' in repo_full_name else self.organization
-        
-        variables = {
-            "repo_owner": repo_owner,
-            "repo_name": repo_name
-        }
-        
-        data = self.execute_graphql_query(query, variables)
-        
-        if not data or 'repository' not in data or not data['repository']:
-            return []
+            """
             
-        teams_data = data['repository'].get('collaboratoringTeams', {})
-        if not teams_data:
-            return []
-        
-        all_teams = []
-        
-        # Map team nodes to edges (which contain permissions)
-        team_map = {}
-        edges = teams_data.get('edges', [])
-        for edge in edges:
-            if edge and edge.get('node') and edge['node'].get('slug'):
-                slug = edge['node']['slug']
-                permission = edge.get('permission', 'unknown')
-                team_map[slug] = permission
-
-        # Process team details
-        nodes = teams_data.get('nodes', [])
-        for team in nodes:
-            if not team:
-                continue
-                
-            slug = team.get('slug')
-            if not slug:
-                continue
-                
-            permission = team_map.get(slug, 'unknown')
+            # Split the repo full name into owner and name
+            repo_owner = repo_full_name.split('/')[0] if '/' in repo_full_name else self.organization
             
-            team_data = {
-                'login': f"@{self.organization}/{slug}",  # Format as @org/team-name
-                'name': team.get('name', ''),
-                'email': '',  # Teams don't have email
-                'avatar_url': '',  # Teams don't have avatars in this context
-                'url': team.get('url', ''),
-                'permission': permission,
-                'type': 'Team',
-                'id': team.get('id', ''),
-                'company': '',  # Teams don't have company
-                'location': '',  # Teams don't have location
-                'team_slug': slug,
-                'team_description': team.get('description', ''),
-                'team_privacy': team.get('privacy', '')
-            }
-            all_teams.append(team_data)
-        
-        return all_teams
+            variables = {"org": repo_owner}
+            
+            data = self.execute_graphql_query(query, variables)
+            
+            if not data or 'organization' not in data or not data['organization']:
+                return []
+                
+            org_data = data['organization']
+            teams_info = org_data.get('teams', {})
+            if not teams_info:
+                return []
+            
+            all_teams = []
+            target_repo_full_name = repo_full_name
+            
+            # Process teams and check if they have access to this specific repository
+            nodes = teams_info.get('nodes', [])
+            for team in nodes:
+                if not team:
+                    continue
+                    
+                slug = team.get('slug')
+                if not slug:
+                    continue
+                
+                # Check if this team has access to the specific repository
+                team_repos = team.get('repositories', {})
+                repo_nodes = team_repos.get('nodes', [])
+                
+                # Find if our target repository is in the team's accessible repositories
+                team_has_access = False
+                
+                for repo_node in repo_nodes:
+                    if repo_node and repo_node.get('nameWithOwner') == target_repo_full_name:
+                        team_has_access = True
+                        break
+                
+                if team_has_access:
+                    team_data = {
+                        'login': f"@{repo_owner}/{slug}",
+                        'name': team.get('name', ''),
+                        'email': '',
+                        'avatar_url': '',
+                        'url': team.get('url', ''),
+                        'permission': 'team',  # Generic team permission - exact level not available via GraphQL
+                        'type': 'Team',
+                        'id': team.get('id', ''),
+                        'company': '',
+                        'location': '',
+                        'team_slug': slug,
+                        'team_description': team.get('description', ''),
+                        'team_privacy': team.get('privacy', '')
+                    }
+                    all_teams.append(team_data)
+            
+            return all_teams
+            
+        except Exception as e:
+            print(f"    ⚠️  Warning: Could not fetch team information: {e}")
+            print(f"    📝 Note: GitHub's GraphQL API has limitations for team permission queries")
+            return []
 
     def fetch_repositories_with_collaborators(self, include_archived: bool = False) -> List[Dict[str, Any]]:
         """
@@ -661,6 +670,8 @@ class GitHubGraphQLPermissionsFetcher:
         print(f"   • Excludes organization-wide inherited permissions")
         print(f"   • Shows explicit repository-level access grants")
         print(f"   • Teams are included as separate entries with @org/team format")
+        print(f"   • Team permissions may be incomplete due to GitHub GraphQL API limitations")
+        print(f"   • For complete team audit, consider using GitHub's web interface or REST API")
         
         return all_repos_data
     
