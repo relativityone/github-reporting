@@ -398,37 +398,20 @@ class GitHubGraphQLPermissionsFetcher:
             else:
                 print(f"    ✅ GitHub CLI authenticated")
             
-            # Test if we can access organization teams via REST API
-            test_token = os.getenv('REL_TOKEN') or os.getenv('GITHUB_PAT') or os.getenv('GITHUB_TOKEN')
-            if test_token:
-                test_headers = {'Authorization': f'token {test_token}', 'Accept': 'application/vnd.github.v3+json'}
-                test_response = requests.get(f'https://api.github.com/orgs/{self.organization}/teams', headers=test_headers, timeout=10)
-                if test_response.status_code == 200:
-                    team_count = len(test_response.json())
-                    print(f"    ✅ REST API can access organization teams (found {team_count} teams)")
-                else:
-                    print(f"    ❌ REST API cannot access organization teams: {test_response.status_code}")
-                    print(f"    💡 This may indicate insufficient token permissions for team access")
+            # Test if GitHub CLI can access organization teams
+            test_result = subprocess.run(['gh', 'api', f'/orgs/{self.organization}/teams', '--jq', 'length'], capture_output=True, text=True, timeout=10)
+            if test_result.returncode == 0:
+                team_count = test_result.stdout.strip()
+                print(f"    ✅ GitHub CLI can access organization teams (found {team_count} teams)")
             else:
-                print(f"    ❌ No token available for team access testing")
+                print(f"    ❌ GitHub CLI cannot access organization teams: {test_result.stderr.strip()}")
+                print(f"    💡 This may indicate insufficient token permissions for team access")
                 
         except Exception as e:
             print(f"    ⚠️  Could not check auth status: {e}")
         
-        print(f"    🔍 Querying teams via REST API for {repo_name}...")
+        print(f"    🔍 Querying teams via GitHub CLI for {repo_name}...")
         all_teams = []
-        
-        # Get the token being used by the main script
-        token = os.getenv('REL_TOKEN') or os.getenv('GITHUB_PAT') or os.getenv('GITHUB_TOKEN')
-        if not token:
-            print(f"    ❌ No authentication token available for team queries")
-            return []
-        
-        headers = {
-            'Authorization': f'token {token}',
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'GitHub-Permissions-Fetcher/1.0'
-        }
         
         # Strategy 1: Try the direct repo teams endpoint
         try:
