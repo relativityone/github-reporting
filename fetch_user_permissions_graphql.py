@@ -375,19 +375,15 @@ class GitHubGraphQLPermissionsFetcher:
         
         This approach uses GitHub CLI but ensures it uses the correct PAT token.
         """
-        # Ensure GitHub CLI uses the correct token
+        # Check token availability for debugging
         token = os.getenv('REL_TOKEN') or os.getenv('GITHUB_PAT') or os.getenv('GITHUB_TOKEN')
         if not token:
             print(f"    ❌ No authentication token available for team queries")
             return []
         
-        # Set the GH_TOKEN environment variable for GitHub CLI
-        env = os.environ.copy()
-        env['GH_TOKEN'] = token
-        
         try:
-            # Check if GitHub CLI is available
-            version_result = subprocess.run(['gh', '--version'], capture_output=True, text=True, check=True, env=env)
+            # Check if GitHub CLI is available - it should already be authenticated via gh auth login
+            version_result = subprocess.run(['gh', '--version'], capture_output=True, text=True, check=True)
             print(f"    🔧 GitHub CLI version: {version_result.stdout.strip().split()[2] if len(version_result.stdout.strip().split()) > 2 else 'unknown'}")
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             print(f"    ⚠️  GitHub CLI (gh) not found or not authenticated: {e}")
@@ -396,7 +392,7 @@ class GitHubGraphQLPermissionsFetcher:
         
         # Check GitHub CLI authentication status
         try:
-            auth_result = subprocess.run(['gh', 'auth', 'status'], capture_output=True, text=True, timeout=10, env=env)
+            auth_result = subprocess.run(['gh', 'auth', 'status'], capture_output=True, text=True, timeout=10)
             if auth_result.returncode != 0:
                 print(f"    🔐 GitHub CLI auth status: {auth_result.stderr.strip()}")
             else:
@@ -404,7 +400,7 @@ class GitHubGraphQLPermissionsFetcher:
             
             # Test if we can access organization teams via GitHub CLI with REL_TOKEN
             test_result = subprocess.run(['gh', 'api', f'/orgs/{self.organization}/teams', '--jq', 'length'], 
-                                       capture_output=True, text=True, timeout=10, env=env)
+                                       capture_output=True, text=True, timeout=10)
             if test_result.returncode == 0:
                 team_count = test_result.stdout.strip()
                 print(f"    ✅ GitHub CLI can access organization teams (found {team_count} teams)")
@@ -427,7 +423,7 @@ class GitHubGraphQLPermissionsFetcher:
                 '--jq', '.[] | {id: .id, name: .name, slug: .slug, description: .description, privacy: .privacy, permission: .permission, url: .html_url}'
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             print(f"    🔧 Direct endpoint - Return code: {result.returncode}")
             if result.stderr:
@@ -456,7 +452,7 @@ class GitHubGraphQLPermissionsFetcher:
                 ]
                 
                 print(f"    🔧 Getting organization teams via GitHub CLI...")
-                teams_result = subprocess.run(cmd_teams, capture_output=True, text=True, timeout=60, env=env)
+                teams_result = subprocess.run(cmd_teams, capture_output=True, text=True, timeout=60)
                 
                 print(f"    🔧 Org teams - Return code: {teams_result.returncode}")
                 if teams_result.stderr:
@@ -464,8 +460,7 @@ class GitHubGraphQLPermissionsFetcher:
                 
                 if teams_result.returncode == 0 and teams_result.stdout.strip():
                     org_teams = []
-                    for line in teams_result.stdout.strip().split('
-'):
+                    for line in teams_result.stdout.strip().split('\n'):
                         if line.strip():
                             try:
                                 org_teams.append(json.loads(line))
@@ -491,7 +486,7 @@ class GitHubGraphQLPermissionsFetcher:
                                 '--jq', '.permissions // empty'
                             ]
                             
-                            check_result = subprocess.run(cmd_check, capture_output=True, text=True, timeout=10, env=env)
+                            check_result = subprocess.run(cmd_check, capture_output=True, text=True, timeout=10)
                             
                             if check_result.returncode == 0 and check_result.stdout.strip():
                                 # Team has access to this repository

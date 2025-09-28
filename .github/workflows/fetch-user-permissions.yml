@@ -47,19 +47,15 @@ jobs:
         cache: 'pip'
     
     - name: Set up GitHub CLI
-      env:
-        GH_TOKEN: ${{ secrets.REL_TOKEN || secrets.GITHUB_TOKEN }}
       run: |
         # GitHub CLI is pre-installed on GitHub Actions runners
         # Authenticate using REL_TOKEN for enhanced permissions
         if [ -n "${{ secrets.REL_TOKEN }}" ]; then
           echo "🔐 Using REL_TOKEN for GitHub CLI authentication"
           echo "${{ secrets.REL_TOKEN }}" | gh auth login --with-token
-          export GH_TOKEN="${{ secrets.REL_TOKEN }}"
         else
-          echo "🔐 Using GITHUB_TOKEN for GitHub CLI authentication"
+          echo "🔐 Using GITHUB_TOKEN for GitHub CLI authentication"  
           echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-          export GH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
         fi
         echo "🔐 GitHub CLI Authentication Status:"
         gh auth status
